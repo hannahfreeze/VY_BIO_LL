@@ -1,0 +1,3746 @@
+---
+title: "Ground-Dwelling Natural Enemy Abundance and Diversity in Relation to Local Management and Landscape Heterogeneity in Okanagan Vineyards"
+author: "Hannah Friesen"
+date: "`r Sys.Date()`"
+output_dir: "02_outputs"
+output:
+  html_document:
+    theme: cosmo         
+    toc: true
+    toc_float: true       # floating sidebar TOC
+    toc_depth: 5
+    df_print: paged
+    highlight: kate
+    number_sections: true
+    code_folding: "hide"
+bibliography: "grateful-refs.bib"
+csl: "https://raw.githubusercontent.com/citation-style-language/styles/master/ecology-letters.csl"
+affiliation: University of British Columbia Okanagan
+---
+
+```{=html}
+<style>
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+</style>
+```
+
+```{r appendix_setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+## SYSTEM INFO
+
+```{r}
+version
+```
+
+## SET UP
+Loading packages required for the analysis
+```{r load-packages}
+# Load necessary libraries
+library(here) # for loading data
+library(tidyverse) 
+library(dplyr) 
+library(corrplot) # to test for correlation
+library(car)
+library(glmmTMB) # for GLMM modelling
+library(lme4) # for LMM modellings
+library(lmerTest)     # p-values for LMM fixed effects
+library(DHARMa) # for residual diagnostics
+library(ggplot2) # for figures
+library(ggeffects)
+library(ggfortify)
+library(grateful) # for citing in Rmarkdown
+library(vegan) # for species accumulation curves
+library(broom.mixed)
+library(officer)
+library(kableExtra)
+library(cowplot) # for figures
+library(flextable) # for tables
+
+```
+
+create an output to cite the packages.
+
+```{r package-citations, echo=FALSE}
+  grateful::cite_packages(
+    output  = "citekeys",
+    out.dir = here::here("01_analysis")
+)
+```
+
+
+## CONTEXT
+
+This research is exploratory and observational. 
+
+The four response variables are (i) spider abundance, (ii) spider family richness, (iii) carabid abundance, (iv) carabid species richness.
+
+The predictor variables are (i) management type (conventional or organic), (ii) vegetation complexity (cover, height and species richness), (iii) proportion of natural area in surrounding landscape, (iv) habitat (vine row or inter row).
+
+
+
+## LOCAL AND LANDSCAPE FACTORS
+
+### Load Predictor Variable Datasets
+
+Let's load the local and landscape data and combine into one dataframe using site_ID.
+
+```{r}
+# Load predictor datasets and vineyard coordinates
+sites <- read_csv(here("00_data", "vineyard_sites.csv"), show_col_types = FALSE)
+veg <- read_csv(here("00_data", "veg_data_VY.csv"))
+landscape <- read_csv(here("00_data", "landscape_metrics.csv"))
+coords <- read_csv(here("00_data", "site_coordinates.csv"))
+
+# Ensure coordinates are numeric
+coords <- coords %>%
+  mutate(site_ID = as.character(site_ID)) %>%
+  mutate(
+    long = as.numeric(unlist(long)),
+    lat  = as.numeric(unlist(lat))
+  )
+
+# combine into one dataframe using site_ID
+vineyard_sites_df <- sites %>%
+  left_join(veg,  by = "site_ID") %>%
+  left_join(landscape,  by = "site_ID") %>%
+  drop_na() 
+
+```
+
+### Summarize Predictor Variables
+
+Next we'll summarize the proportion of natural areas in the surrounding 1000m landscape and distance to nearest natural area by management type.
+
+```{r}
+# Landscape summary
+summary_landscape <- vineyard_sites_df %>%
+  group_by(management_type) %>%
+  summarise(
+    n_sites        = n_distinct(site_ID),
+    avg_natural    = mean(total_natural_1000, na.rm = TRUE),
+    sd_natural     = sd(total_natural_1000, na.rm = TRUE),
+    min_natural    = min(total_natural_1000, na.rm = TRUE),
+    max_natural    = max(total_natural_1000, na.rm = TRUE),
+    avg_distance_to_natural = mean(distance_to_natural, na.rm = TRUE),
+    sd_distance_natural     = sd(distance_to_natural, na.rm = TRUE),
+    min_distance_natural    = min(distance_to_natural, na.rm = TRUE),
+    max_distance_natural    = max(distance_to_natural, na.rm = TRUE),
+    .groups = "drop")
+
+summary_landscape
+
+# save as table
+write.csv(
+  summary_landscape,
+  here::here("02_tables", "summary_landscape.csv"),
+  row.names = FALSE
+)
+
+
+```
+
+Now let's look at the local vegetation predictor variables by management type. 
+
+```{r}
+# Compute summary statistics
+summary_veg_table <- vineyard_sites_df %>%
+  group_by(management_type, habitat) %>%
+  summarise(
+    veg_cover_mean   = mean(avg_veg_cover, na.rm = TRUE),
+    veg_cover_sd     = sd(avg_veg_cover, na.rm = TRUE),
+
+    veg_height_mean  = mean(avg_veg_height, na.rm = TRUE),
+    veg_height_sd    = sd(avg_veg_height, na.rm = TRUE),
+
+    veg_rich_mean    = mean(veg_richness, na.rm = TRUE),
+    veg_rich_sd      = sd(veg_richness, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+# make table for thesis
+summary_veg_clean <- summary_veg_table %>%
+  tidyr::pivot_longer(
+    cols = starts_with("veg_"),
+    names_to = "Variable",
+    values_to = "Value"
+  ) %>%
+  tidyr::separate(
+    Variable,
+    into = c("metric", "stat"),
+    sep = "_(?=[^_]+$)"   # splits "veg_cover_mean" into "veg_cover" + "mean"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from  = c(management_type, habitat, stat),
+    values_from = Value
+  )
+
+summary_veg_clean
+
+# save as table
+write.csv(
+  summary_veg_clean,
+  here::here("02_tables", "summary_veg_clean.csv"),
+  row.names = FALSE
+)
+
+
+```
+Next we'll use line plots to visualize vegetation characteristics by location (vine row/ inter-row) and management
+```{r}
+
+# plot vegetation characteristics by location (vine row/ inter row) and management type
+# let's use line plots to account for the paired design of vine rows/ interrows!
+# average veg cover
+veg_cover_mgmt <- ggplot(vineyard_sites_df, aes(x = habitat, y = avg_veg_cover, group = interaction(site_ID, year), color = management_type)) +
+  geom_line(alpha = 0.5) +
+  geom_point(
+    aes(fill = management_type),
+    shape = 21, size = 3, stroke = 1.2
+  ) +
+  scale_x_discrete(labels = c("CR" = "Vine row", "DR" = "Inter-row")) +
+  scale_color_manual(values = c("conv" = "black", "org" = "#009E73")) +
+  scale_fill_manual(values = c("conv" = "white", "org" = "white")) +
+  labs(
+    title = "Vegetation cover",
+    x = NULL,
+    y = "Vegetation cover (%)",
+    color = "Management",
+    fill = "Management"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+veg_cover_mgmt 
+
+# plot vegetation characteristics by location (vine row/ inter row) and management type
+# let's use line plots to account for the paired design of vine rows/ interrows!
+# average veg height
+veg_height_mgmt <- ggplot(vineyard_sites_df, aes(x = habitat, y = avg_veg_height, group = interaction(site_ID, year), color = management_type)) +
+  geom_line(alpha = 0.5) +
+  geom_point(
+    aes(fill = management_type),
+    shape = 21, size = 3, stroke = 1.2
+  ) +
+  scale_x_discrete(labels = c("CR" = "Vine row", "DR" = "Inter-row")) +
+  scale_color_manual(values = c("conv" = "black", "org" = "#009E73")) +
+  scale_fill_manual(values = c("conv" = "white", "org" = "white")) +
+  labs(
+    title = "Vegetation height",
+    x = NULL,
+    y = "Vegetation height (cm)",
+    color = "Management",
+    fill = "Management"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+veg_height_mgmt
+
+# plot vegetation characteristics by location (vine row/ inter row) and management type
+# let's use line plots to account for the paired design of vine rows/ interrows!
+# veg richness
+veg_richness_mgmt <- ggplot(vineyard_sites_df, aes(
+  x = habitat,
+  y = veg_richness,
+  group = interaction(site_ID, year),
+  color = management_type
+)) +
+  geom_line(alpha = 0.5) +
+  geom_point(
+    aes(fill = management_type),
+    shape = 21, size = 3, stroke = 1.2
+  ) +
+  scale_x_discrete(labels = c("CR" = "Vine row", "DR" = "Inter-row")) +
+  scale_color_manual(values = c("conv" = "black", "org" = "#009E73")) +
+  scale_fill_manual(values = c("conv" = "white", "org" = "white")) +
+  labs(
+    title = "Vegetation richness",
+    x = NULL,
+    y = "Vegetation richness",
+    color = "Management",
+    fill = "Management"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+veg_richness_mgmt
+```
+
+
+Vegetation cover, height and richness are on average higher in organic vineyards compared to conventional vineyards, with the greatest difference seen in the vine row. This makes sense, since many conventional vineyards use herbicide under the vine row. 
+
+### Models for Vegetation Variables
+
+Let's use LMM's to explore how vegetation properties vary by management type, habitat and year. 
+
+```{r}
+# Make sure factors are set correctly
+veg_VY_data <- vineyard_sites_df %>%
+  mutate(
+    management_type = factor(management_type),
+    habitat         = factor(habitat),  # CR / DR
+    year            = factor(year)
+  )
+
+# 1) Vegetation cover (%): LMM (Gaussian)
+lm_cover <- lmer(
+  avg_veg_cover ~ management_type + habitat + year + (1 | site_ID),
+  data = veg_VY_data
+)
+
+# 2) Vegetation height (cm): LMM (Gaussian)
+lm_height <- lmer(
+  avg_veg_height ~ management_type + habitat + year + (1 | site_ID),
+  data = veg_VY_data
+)
+
+# 3) Vegetation richness: LMM (Gaussian)
+lm_rich <- lmer(
+  veg_richness ~ management_type + habitat + year + (1 | site_ID),
+  data = veg_VY_data
+)
+
+# Summaries
+summary(lm_cover)
+summary(lm_height)
+summary(lm_rich)
+
+# R2 (marginal = fixed effects only; conditional = fixed + random)
+performance::r2(lm_cover)
+performance::r2(lm_height)
+performance::r2(lm_rich)
+
+```
+
+Let's make sure the residuals look okay
+```{r}
+# Calculate residuals
+residuals_cover <- residuals(lm_cover)
+
+#Calculate predicted
+predicted_cover <- predict(lm_cover)
+
+# Plot the ordinary residuals against the fitted values
+plot(predicted_cover, residuals_cover,
+     main = "Residuals vs Fitted Values, Cover",
+     xlab = "Fitted Values",
+     ylab = "Residuals",
+     pch = 16, col = "blue")
+
+# Calculate residuals
+residuals_height <- residuals(lm_height)
+
+#Calculate predicted
+predicted_height <- predict(lm_height)
+
+# Plot the ordinary residuals against the fitted values
+plot(predicted_height, residuals_height,
+     main = "Residuals vs Fitted Values, Height",
+     xlab = "Fitted Values",
+     ylab = "Residuals",
+     pch = 16, col = "blue")
+
+# Calculate residuals
+residuals_rich <- residuals(lm_rich)
+
+#Calculate predicted
+predicted_rich <- predict(lm_rich)
+
+# Plot the ordinary residuals against the fitted values
+plot(predicted_rich, residuals_rich,
+     main = "Residuals vs Fitted Values, Richness",
+     xlab = "Fitted Values",
+     ylab = "Residuals",
+     pch = 16, col = "blue")
+
+
+
+
+```
+
+Residuals versus fitted values do not indicate strong heteroskedasticity, with residual variance remaining relatively constant across the range of fitted values.
+
+Finally let's make a summary table of the LMM's for the vegetation variables by management.
+
+```{r}
+# Tidy fixed effects tables for vegetation variable linear models
+tidy_veg_models <- bind_rows(
+  tidy(lm_cover,  effects = "fixed", conf.int = TRUE) %>% mutate(Response = "Vegetation cover (%)"),
+  tidy(lm_height, effects = "fixed", conf.int = TRUE) %>% mutate(Response = "Vegetation height (cm)"),
+  tidy(lm_rich,   effects = "fixed", conf.int = TRUE) %>% mutate(Response = "Vegetation richness")
+) %>%
+  dplyr::select(Response, term, estimate, std.error, statistic, p.value)
+
+
+tidy_veg_models_fmt <- tidy_veg_models %>%
+  mutate(
+    estimate  = round(estimate, 2),
+    std.error = round(std.error, 2),
+    statistic = round(statistic, 2),
+    p.value   = ifelse(p.value < 0.001, "<0.001", round(p.value, 3)),
+  )
+
+# save as table
+write.csv(
+  tidy_veg_models_fmt,
+  here::here("02_tables", "veg_model_table.csv"),
+  row.names = FALSE
+)
+
+
+
+# format nicely for word doc using flextable package
+veg_table <- flextable(tidy_veg_models_fmt) %>%
+  set_header_labels(
+    Response   = "Response",
+    term       = "Predictor",
+    estimate   = "Estimate",
+    std.error  = "SE",
+    statistic  = "t value",
+    p.value    = "p value"
+  ) %>%
+  autofit()
+
+veg_table
+
+
+```
+
+
+### Check for collinearity
+
+Let's check to see if the vegetation variables are collinear. 
+
+```{r}
+# Check collinearity among predictor vegetation variables
+cor_matrix <- cor(veg[, c("avg_veg_height", "avg_veg_cover", "veg_richness")], 
+                  use = "complete.obs")
+cor_matrix
+
+# Plot the correlation matrix
+corrplot(cor_matrix, method = "circle", type = "upper", order = "hclust",
+         addCoef.col = "black", # Color of the correlation coefficients
+         tl.col = "black", tl.srt = 45) # Color and rotation of the labels
+
+```
+
+
+The vegetation variables are moderately collinear (0.3-0.52), but below the 0.7 rule of thumb threshold. They can likely be modelled at individual predictors without causing problems.  
+
+
+### Scaling predictor variables
+Prior to modelling, let's scale the continuous predictor variables to enable comparisons. 
+
+```{r}
+# scale predictor variables 
+# simplify dataset to include only necessary variables
+predictor_variables <- vineyard_sites_df %>%
+  mutate(
+    z_veg_height = scale(avg_veg_height),
+    z_veg_cover = scale(avg_veg_cover),
+    z_veg_richness = scale(veg_richness),
+    z_total_natural_100 = scale(total_natural_100),
+    z_total_natural_250 = scale(total_natural_250),
+    z_total_natural_500 = scale(total_natural_500),
+    z_total_natural_750 = scale(total_natural_750),
+    z_total_natural_1000 = scale(total_natural_1000),
+    z_distance_natural = scale(distance_to_natural)
+  ) %>%
+  dplyr::select(
+    site_ID,
+    year,
+    habitat,
+    management_type,
+    avg_veg_height, avg_veg_cover, veg_richness, total_natural_100, total_natural_250, total_natural_500, total_natural_750, total_natural_1000, distance_to_natural,
+    z_veg_height, z_veg_cover, z_veg_richness, z_total_natural_100, z_total_natural_250, z_total_natural_500, z_total_natural_750, z_total_natural_1000, z_distance_natural
+  )
+```
+
+
+
+## SPIDERS
+
+### Data import and summarizing
+
+Let's import the raw spider data and summarize by site/ habitat/ year. Let's also calculate the total number of spiders collected in vineyards, and the number of different families. Note that spiders that could not be identified to family level, either due to damage or being juveniles, are included in total spider count but not in family richness count.
+
+```{r load-data}
+# Load spider data
+spider_VY_df <- read.csv(here::here("00_data","spider_VY_df.csv"))
+
+# Summarize spider abundance by site_ID, habitat and year
+spider_abundance_VY <- spider_VY_df %>%
+  group_by(site_ID, habitat, year) %>%
+  summarize(
+    spider_abundance = sum(total_count, na.rm = TRUE),      # Sum, ignoring NAs
+    trap_count = sum(!is.na(total_count)),         # Count of non-NA values
+    .groups = "drop"
+  )
+
+# Total number of spiders found in vineyards across all sites and years
+total_spiders_VY <- sum(spider_VY_df$total_count, na.rm = TRUE)
+
+# VY FAMILY RICHNESS
+# Define the full set of site and habitat combinations
+site_habitat_all <- spider_VY_df %>%
+  distinct(site_ID, habitat, year)
+
+# Identify family columns 
+family_start <- which(names(spider_VY_df) == "family_richness") + 1
+family_columns <- names(spider_VY_df)[family_start:ncol(spider_VY_df)]
+
+# Then re-define unid and identified categories
+unid_cols <- union("UNID.", "LYCOSIDAE..juvenile.")  # add the juveniles
+family_columns <- setdiff(family_columns, unid_cols)
+
+# Long format
+spider_long_VY <- spider_VY_df %>%
+  pivot_longer(all_of(family_columns), names_to = "spider_family", values_to = "count") %>%
+  mutate(count = as.numeric(count))
+
+# Get a list of all families observed at least once
+observed_families_VY <- spider_long_VY %>%
+  filter(count > 0) %>% 
+  distinct(spider_family) %>%
+  arrange(spider_family)
+
+# Total number of unique species across all vineyard sites and years
+total_family_richness_VY <- spider_long_VY %>%
+  filter(!is.na(count), count > 0) %>%
+  distinct(spider_family) %>%
+  nrow()
+
+# Family richness per site × habitat × year (count only families with >0)
+spider_richness_VY <- spider_long_VY %>%
+  filter(!is.na(count), count > 0) %>%
+  distinct(site_ID, habitat, year, spider_family) %>%
+  count(site_ID, habitat, year, name = "family_richness")
+
+# MERGE ABUNDANCE AND RICHNESS
+# Merge the abundance and richness by site ID, habitat and year
+# replace the one datapoint with family_richness of 0
+spider_data_VY <- spider_abundance_VY %>%
+  left_join(spider_richness_VY, by = c("site_ID", "habitat", "year")) %>%
+  mutate(family_richness = replace_na(family_richness, 0))
+
+cat("Total spiders in vineyards across all sites and years:", total_spiders_VY, "\n")
+
+cat("Total spider family richness across all vineyard sites and years:", total_family_richness_VY, "\n")
+
+print (observed_families_VY)
+
+cat("Number of site × habitat × year combinations:", nrow(spider_data_VY), "\n")
+
+```
+
+Now lets make some figures to explore the family abundance and site occupancy, as well as make a family accumulation curve to evaluate sampling effort.
+
+```{r}
+# FAMILY ABUNDANCE AND SITE OCCUPANCY FIGURES
+# Summarize total abundance per family
+spider_family_VY_totals <- spider_long_VY %>%
+  group_by(spider_family) %>%
+  summarise(total_count = sum(count, na.rm = TRUE)) %>%
+  filter(total_count > 0) %>%            # <-- only keep families with > 0 individuals
+  arrange(desc(total_count)) %>%
+  mutate(spider_family = factor(spider_family, levels = rev(spider_family)))
+
+# Reorder factor levels for plotting
+spider_family_VY_totals <- spider_family_VY_totals %>%
+  mutate(spider_family = factor(spider_family, levels = rev(spider_family)))
+
+# Abundance plot
+spider_abund_vy <- spider_family_VY_totals %>%
+  mutate(
+    # Convert family names to title case
+    spider_family = str_to_title(str_to_lower(spider_family)),
+    # Reorder by abundance (most abundant at the top)
+    spider_family = fct_reorder(spider_family, total_count, .desc = FALSE)
+  ) %>%
+  ggplot(aes(x = total_count, y = spider_family)) +
+  geom_col(fill = "grey70", color = "black") +
+  labs(
+    x = "Number of individuals",
+    y = "Spider family"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_blank(),
+    axis.text.y  = element_text(size = 10),
+    axis.text.x  = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10)
+  )
+
+#  Calculate site occupancy = number of unique sites where each family was detected in VY
+spider_occupancy_VY <- spider_long_VY %>%
+  filter(count > 0) %>%  # exclude zeros if present
+  distinct(site_ID, spider_family) %>%
+  count(spider_family, name = "site_occupancy") %>%
+  arrange(desc(site_occupancy))
+
+# Reorder factor levels for plotting
+spider_occupancy_VY <- spider_occupancy_VY %>%
+  mutate(spider_family = factor(spider_family, levels = rev(spider_family)))
+
+# Occupancy plot
+spider_occupancy_vy <- spider_occupancy_VY %>%
+  mutate(
+    # Convert to title case first
+    spider_family = str_to_title(str_to_lower(spider_family))
+  ) %>%
+  # Then reorder by site occupancy (descending)
+  mutate(
+    spider_family = fct_reorder(spider_family, site_occupancy, .desc = FALSE)
+  ) %>%
+  ggplot(aes(x = site_occupancy, y = spider_family)) +
+  geom_col(fill = "grey70", color = "black") +
+  labs(
+    x = "Sites detected",
+    y = "Spider family"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_blank(),
+    axis.text.y  = element_text(size = 10),
+    axis.text.x  = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10)
+  )
+
+spider_abund_vy
+spider_occupancy_vy
+
+
+# FAMILY ACCUMULATION CURVE
+# Aggregate trap-level data to site-level totals
+site_family_matrix <- spider_VY_df %>%
+  group_by(site_ID) %>%
+  summarise(across(all_of(family_columns), ~ sum(as.numeric(.), na.rm = TRUE))) %>%
+  ungroup() %>%
+  as.data.frame()
+
+# Drop the site_ID column for the matrix
+rownames(site_family_matrix) <- site_family_matrix$site_ID
+site_family_matrix <- site_family_matrix[ , -1]
+
+# Remove all-zero families
+keep <- colSums(site_family_matrix, na.rm = TRUE) > 0
+site_family_matrix <- site_family_matrix[, keep, drop = FALSE]
+
+# Build accumulation curve
+acc_site <- specaccum(site_family_matrix, method = "random", permutations = 1000)
+
+# Prepare tidy dataframe for plotting
+acc_site_df <- tibble(
+  sites = acc_site$sites,
+  richness = acc_site$richness,
+  se = acc_site$sd
+)
+
+# Plot
+spider_family_accumulation <- ggplot(acc_site_df, aes(x = sites, y = richness)) +
+  geom_line(linewidth = 1) +
+  geom_errorbar(aes(ymin = richness - 1.96 * se,
+                    ymax = richness + 1.96 * se),
+                width = 0.3) +
+  labs(
+    x = "Number of sites",
+    y = "Number of spider families observed",
+  ) +
+  theme_minimal(base_size = 10)
+
+spider_family_accumulation
+```
+
+Zodariidae was by far the most abundant family with over 2000 individuals, while Lycosidae was the second most abundant and occurred at the most sites.
+
+The accumulation curve shows that spider family richness increases rapidly at first and then begins to level off, indicating that sampling effort was sufficient for capturing most families present in vineyards.
+
+### Descriptive stats
+
+First let's join the predictor variables to the spider response variables. 
+Remove sites missing data (site 5 from 2024 was removed from analysis since the vines were pulled out, and site 36 was removed as it had just been replanted in 2025)
+
+```{r}
+# Full combined dataset (with predictor variables)
+spider_data <- spider_data_VY %>%
+  inner_join(predictor_variables, by = c("site_ID", "habitat", "year"))
+
+
+# Remove incomplete rows (2 sites missing predictor variable data)
+# convert others to factors
+spider_df_clean <- spider_data %>%
+  drop_na() %>%
+  mutate(
+    site_ID         = as.factor(site_ID),
+    management_type = as.factor(management_type),
+    habitat         = factor(habitat, levels = c("CR", "DR")),
+    trap_count      = as.numeric(trap_count)
+  )
+```
+
+Next let's take a closer look at the response variables (spider abundance and family richness)
+
+```{r}
+# select spider abundance and family richness columns
+spider_response_variables <- spider_df_clean %>%
+  dplyr::select(
+    spider_abundance,
+    family_richness)
+
+# Compute summary statistics
+spider_summary <- as.data.frame(
+  apply(spider_response_variables, 2, function(x){
+    c(
+      mean   = mean(x, na.rm = TRUE),
+      sd     = sd(x, na.rm = TRUE),
+      min    = min(x, na.rm = TRUE),
+      max    = max(x, na.rm = TRUE),
+      median = median(x, na.rm = TRUE),
+      IQR    = IQR(x, na.rm = TRUE)
+    )
+  })
+)
+
+# Make rows readable
+spider_summary
+
+
+```
+
+
+Spider abundance averaged 49 individuals per habitat and sampling period, with counts ranging widely from 0 to 261 individuals. Spider family-level richness had a narrower range (0–10 families) and averaged five families per habitat and sampling period. 
+
+I also want to make summary tables for spiders by 1) management type, 2) habitat and 3) year
+
+```{r}
+# spider abundance and richness summary stats
+response_summary_by <- function(data, group_var, group_label) {
+  data %>%
+    group_by({{ group_var }}) %>%
+    summarise(
+      spider_abundance_mean   = mean(spider_abundance,   na.rm = TRUE),
+      spider_abundance_sd     = sd(spider_abundance,     na.rm = TRUE),
+      spider_abundance_min    = min(spider_abundance,    na.rm = TRUE),
+      spider_abundance_max    = max(spider_abundance,    na.rm = TRUE),
+      spider_abundance_median = median(spider_abundance, na.rm = TRUE),
+      spider_abundance_IQR    = IQR(spider_abundance,    na.rm = TRUE),
+
+      spider_rich_mean        = mean(family_richness,    na.rm = TRUE),
+      spider_rich_sd          = sd(family_richness,      na.rm = TRUE),
+      spider_rich_min         = min(family_richness,     na.rm = TRUE),
+      spider_rich_max         = max(family_richness,     na.rm = TRUE),
+      spider_rich_median      = median(family_richness,  na.rm = TRUE),
+      spider_rich_IQR         = IQR(family_richness,     na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Level    = as.character({{ group_var }}),  # <-- force common type
+      Grouping = group_label
+    ) %>%
+    dplyr::select(Grouping, Level, everything(), -{{ group_var }})
+}
+
+
+# 1) By management type
+summary_by_mgmt <- response_summary_by(
+  spider_df_clean,
+  management_type,
+  "Management type"
+)
+
+# 2) By habitat
+summary_by_habitat <- response_summary_by(
+  spider_df_clean,
+  habitat,
+  "Habitat"
+)
+
+# 3) By year
+summary_by_year <- response_summary_by(
+  spider_df_clean,
+  year,
+  "Year"
+)
+
+# Combine into one long table
+response_summary_all <- bind_rows(
+  summary_by_mgmt,
+  summary_by_habitat,
+  summary_by_year
+)
+
+response_summary_all
+
+# save as table
+write.csv(
+  response_summary_all,
+  here::here("02_tables", "spider_summary.csv"),
+  row.names = FALSE
+)
+
+```
+
+Spider abundance and richness higher in organic vineyards, but also lots of variability. 
+Very similar between vine rows (CR) and inter rows (DR)
+Higher in 2025 compared to 2024. 
+
+### Data Exploration
+
+#### Spider Abundance
+
+Let's explore the data prior to modelling.
+
+First let's look at the distribution of spider abundance using a histogram.
+
+```{r}
+# Visualize response variable distribution
+spider_abund_histo <- ggplot(spider_df_clean, aes(x = spider_abundance)) + 
+  geom_histogram(bins = 15, fill = "grey", color = "black") +
+  theme_minimal() + 
+  labs(title = "Spider abundance", x = "Number of individuals", y = "Frequency")
+
+spider_abund_histo
+```
+
+Let's also look at the difference between organic and conventional vineyards and sampling location using boxplots (just management) and lineplots (management and sampling location, lines represent the paired design)
+
+```{r}
+# calculate abundance per trap
+spider_VY <- spider_df_clean %>%
+  mutate(
+    abundance_per_trap = spider_abundance / trap_count
+  )
+
+# Define custom color palette for management type
+mgmt_colors <- c("org" = "#009E73", "conv" = "grey")  # forest green and steel blue
+
+
+# plot spider abundance per trap by management type
+spider_abundance_management <- ggplot(
+  spider_VY, 
+  aes(x = management_type, y = spider_abundance, fill = management_type)
+) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  theme_minimal() +
+  scale_fill_manual(values = mgmt_colors, labels = c("conv" = "Conventional", "org" = "Organic")) +
+  labs(
+    title = "Spider abundance",
+    x = NULL,                 # remove x-axis label
+    y = "Spider abundance"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, size = 12)  # center title
+  )
+
+spider_abundance_management
+
+# plot spider abundance per trap by management type and habitat
+# let's use line plots to account for the paired design of vine rows/ interrows!
+spider_abundance_habitat<- ggplot(spider_VY, aes(
+  x = habitat,
+  y = spider_abundance,
+  group = interaction(site_ID, year),
+  color = management_type
+)) +
+  geom_line(alpha = 0.5) +
+  geom_point(
+    aes(fill = management_type),
+    shape = 21, size = 3, stroke = 1.2
+  ) +
+  scale_x_discrete(labels = c("CR" = "Vine row", "DR" = "Inter-row")) +
+  scale_color_manual(values = c("conv" = "black", "org" = "#009E73")) +
+  scale_fill_manual(values = c("conv" = "white", "org" = "white")) +
+  labs(
+    title = "Spider abundance",
+    x = NULL,
+    y = "Spider abundance",
+    color = "Management",
+    fill = "Management"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+spider_abundance_habitat 
+
+
+```
+
+Use scatterplots to look at spider abundance by the continuous predictor variables (vegetation complexity, proportion of natural areas in surrounding landscape etc.)
+
+```{r}
+# plot spider abundance by vegetation cover
+ggplot(spider_df_clean, aes(x = avg_veg_cover, y = spider_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation cover",
+    y = "Spider abundance",
+    title = "Spider abundance vs vegetation cover"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot spider abundance by vegetation height
+ggplot(spider_df_clean, aes(x = avg_veg_height, y = spider_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation height",
+    y = "Spider abundance",
+    title = "Spider abundance vs vegetation height"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot spider abundance by vegetation richness
+ggplot(spider_df_clean, aes(x = veg_richness, y = spider_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation richness",
+    y = "Spider abundance",
+    title = "Spider abundance vs vegetation richness"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+# plot spider abundance by natural area (500m)
+ggplot(spider_df_clean, aes(x = total_natural_500, y = spider_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Proportion natural habitat (500 m buffer)",
+    y = "Spider abundance",
+    title = "Spider abundance vs natural habitat (500 m)"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot spider abundance by distance to natural area
+ggplot(spider_df_clean, aes(x = distance_to_natural, y = spider_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Distance to natural habitat",
+    y = "Spider abundance",
+    title = "Spider abundance vs distance to natural habitat"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+Spider abundance appears to increase with increasing vegetation height and cover, but no pattern with proportion natural areas in surrounding landscape.
+
+#### Spider Family Richness
+Now we'll do the same thing looking at spider family richness. 
+
+First let's look at the histogram
+
+```{r}
+# Histogram of spider family richness
+spider_richness_histo <- ggplot(spider_df_clean, aes(x = family_richness)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "black") +
+  theme_minimal() +
+  (labs(title = "Spider richness", x = "Number of families", y = "Frequency"))
+
+spider_richness_histo
+
+```
+
+pretty evenly distributed between 0 and 10
+
+```{r}
+# plot spider family richness per trap by management type
+spider_richness_management <- ggplot(
+  spider_VY, 
+  aes(x = management_type, y = family_richness, fill = management_type)
+) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  theme_minimal() +
+  scale_fill_manual(values = mgmt_colors, labels = c("Conventional", "Organic")) +
+  labs(
+    title = "Spider richness",
+    x = NULL,                 # remove x-axis label
+    y = "Family richness"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, size = 12)  # center title
+  )
+
+spider_richness_management
+
+# plot spider richness by management type and habitat
+# let's use line plots to account for the paired design of vine rows/ interrows!
+spider_richness_habitat <- ggplot(spider_VY, aes(
+  x = habitat,
+  y = family_richness,
+  group = interaction(site_ID, year),
+  color = management_type
+)) +
+  geom_line(alpha = 0.5) +
+  geom_point(
+    aes(fill = management_type),
+    shape = 21, size = 3, stroke = 1.2
+  ) +
+  scale_x_discrete(labels = c("CR" = "Vine row", "DR" = "Inter-row")) +
+  scale_color_manual(values = c("conv" = "black", "org" = "#009E73")) +
+  scale_fill_manual(values = c("conv" = "white", "org" = "white")) +
+  labs(
+    title = "Spider richness",
+    x = NULL,
+    y = "Spider richness",
+    color = "Management",
+    fill = "Management"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+spider_richness_habitat
+
+```
+
+pretty similar between conventional and organic management, and sampling locations
+
+```{r}
+# plot spider family richness by vegetation height
+ggplot(spider_df_clean, aes(x = avg_veg_height, y = family_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation height",
+    y = "Family Richness",
+    title = "Spider Richness vs Vegetation height"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot spider family richness by vegetation cover
+ggplot(spider_df_clean, aes(x = avg_veg_cover, y = family_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation cover",
+    y = "Family Richness",
+    title = "Spider Richness vs Vegetation cover"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+# plot spider family richness by vegetation richness
+ggplot(spider_df_clean, aes(x = veg_richness, y = family_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation richness",
+    y = "Family Richness",
+    title = "Spider Richness vs Vegetation richness"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot spider abundance by natural area (500m)
+ggplot(spider_df_clean, aes(x = total_natural_500, y = family_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Proportion Natural Habitat (500 m buffer)",
+    y = "Family Richness",
+    title = "Spider Richness vs Natural Habitat (500 m)"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot spider richness by distance to natural area (500m)
+ggplot(spider_df_clean, aes(x = distance_to_natural, y = family_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Distance to Natural Habitat",
+    y = "Spider Richness",
+    title = "Spider Richness vs Distance to Natural Habitat"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+No obvious trends of spider family by the local and landscape continuous variables.
+
+
+## CARABIDS
+
+### Data import and summarizing
+
+Let's import the raw carabid data and summarize by site/ sampling location/ year. Let's also calculate the total number of carabids collected in vineyards, and the number of different species.
+
+```{r}
+# Load raw carabid data
+carabid_VY_df <- read.csv(here::here("00_data", "carabid_VY_df.csv"))
+
+# Summarize carabid abundance by site_ID, habitat and year
+carabid_abundance_VY <- carabid_VY_df %>%
+  group_by(site_ID, habitat, year) %>%
+  summarize(
+    carabid_abundance = sum(total_abundance, na.rm = TRUE),      # Sum, ignoring NAs
+    trap_count = sum(!is.na(total_abundance)),         # Count of non-NA values
+    .groups = "drop"
+  )
+
+# Total number of carabids found in vineyards across all sites and years
+total_carabids_VY <- sum(carabid_VY_df$total_abundance, na.rm = TRUE)
+
+# Richness
+
+# Identify species columns 
+species_start <- which(names(carabid_VY_df) == "species_richness") + 1
+species_columns <- names(carabid_VY_df)[species_start:ncol(carabid_VY_df)]
+
+# Split identified vs unidentified (for richness)
+unid_cols <- intersect(species_columns, c("UNID","UNID."))
+species_columns <- setdiff(species_columns, unid_cols)
+
+# Long format
+carabid_long_VY <- carabid_VY_df %>%
+  pivot_longer(all_of(species_columns), names_to = "carabid_species", values_to = "count") %>%
+  mutate(count = as.numeric(count))
+
+# Get a list of all species observed at least once
+observed_species_VY <- carabid_long_VY %>%
+  filter(count > 0) %>% 
+  distinct(carabid_species) %>%
+  arrange(carabid_species)
+
+# species richness per site × habitat × year
+carabid_richness_VY <- carabid_long_VY %>%
+  filter(!is.na(count), count > 0) %>%
+  distinct(site_ID, habitat, year, carabid_species) %>%
+  count(site_ID, habitat, year, name = "species_richness")
+
+# Merge abundance and richness summaries by site, year and habitat
+carabid_data_VY <- carabid_abundance_VY %>%
+  left_join(
+    carabid_richness_VY,
+    by = c("site_ID", "habitat", "year")
+  ) %>%
+  mutate(species_richness = replace_na(species_richness, 0))
+
+
+# Total number of unique species across all vineyard sites and years
+total_species_richness_VY <- carabid_long_VY %>%
+  filter(!is.na(count), count > 0) %>%
+  distinct(carabid_species) %>%
+  nrow()
+
+
+# Extract genus from species name and count unique genera
+total_genus_richness_VY <- carabid_long_VY %>%
+  filter(!is.na(count), count > 0) %>%
+  mutate(genus = stringr::str_extract(carabid_species, "^[A-Za-z]+")) %>%
+  distinct(genus) %>%
+  nrow()
+
+
+cat("Total carabids in vineyards across all sites and years:", total_carabids_VY, "\n")
+cat("Total carabid species richness across all vineyard sites and years:", total_species_richness_VY, "\n")
+
+print(observed_species_VY)
+cat("Total carabid genus richness across all vineyard sites and years:", total_genus_richness_VY, "\n")
+cat("Number of site × habitat × year combinations:", nrow(carabid_data_VY), "\n")
+
+```
+
+Now let's make some plots to look at abundance and site occupancy by genus, as well as species accumulation to evaluate sampling effort.
+
+```{r}
+# VY Site occupancy and species abundance plots
+# Summarize total abundance per species
+carabid_species_VY_totals <- carabid_long_VY %>%
+  group_by(carabid_species) %>%
+  summarise(total_abundance = sum(count, na.rm = TRUE)) %>%
+  filter(total_abundance > 0) %>%           
+  arrange(desc(total_abundance)) %>%
+  mutate(carabid_species = factor(carabid_species, levels = rev(carabid_species)))
+
+
+# Genus totals & occupancy (VY)
+carabid_long_genus_VY <- carabid_long_VY %>%
+  mutate(genus = str_extract(carabid_species, "^[A-Za-z]+")) %>%  # extract genus
+  group_by(site_ID, habitat, genus) %>%
+  summarise(count = sum(count, na.rm = TRUE), .groups = "drop")
+
+carabid_genus_totals_vy <- carabid_long_genus_VY %>%
+  group_by(genus) %>%
+  summarise(total_abundance = sum(count, na.rm = TRUE), .groups = "drop") %>%
+  filter(total_abundance > 0) %>%  # remove genera with 0 abundance
+  arrange(desc(total_abundance))
+
+# create plot for abundance
+genus_abund_vy <- carabid_genus_totals_vy %>%
+  mutate(genus = forcats::fct_reorder(genus, total_abundance)) %>%
+  ggplot(aes(x = total_abundance, y = genus)) +
+  geom_col(fill = "grey70", color = "black", width = 0.8) +
+  labs(
+    x = "Number of individuals",
+    y = "Carabid genus"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_blank(),                # remove title
+    axis.title.x = element_text(size = 10),      # larger axis titles
+    axis.title.y = element_text(size = 10),
+    axis.text.y  = element_text(face = "italic", size = 10),  # italic + larger genus labels
+    axis.text.x  = element_text(size = 10)
+  )
+
+
+# plot for occupancy
+carabid_genus_occupancy_vy <- carabid_long_genus_VY %>%
+  filter(count > 0) %>%
+  distinct(site_ID, genus) %>%
+  count(genus, name = "site_occupancy") %>%
+  arrange(desc(site_occupancy))
+
+genus_site_occupancy_vy <- carabid_genus_occupancy_vy %>%
+  mutate(genus = forcats::fct_reorder(genus, site_occupancy)) %>%
+  ggplot(aes(x = site_occupancy, y = genus)) +
+  geom_col(fill = "grey70", color = "black", width = 0.8) +
+  labs(
+    x = "Sites detected",
+    y = "Carabid genus"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_blank(),                # remove title
+    axis.title.x = element_text(size = 10),      # larger axis titles
+    axis.title.y = element_text(size = 10),
+    axis.text.y  = element_text(face = "italic", size = 10),  # italic + larger genus labels
+    axis.text.x  = element_text(size = 10)
+  )
+
+
+# plot
+genus_abund_vy
+genus_site_occupancy_vy
+
+
+# SPECIES ACCUMULATION CURVE
+# Aggregate trap-level data to site-level totals
+site_species_matrix <- carabid_VY_df %>%
+  group_by(site_ID) %>%
+  summarise(across(all_of(species_columns), ~ sum(as.numeric(.), na.rm = TRUE))) %>%
+  ungroup() %>%
+  as.data.frame()
+
+# Drop the site_ID column for the matrix
+rownames(site_species_matrix) <- site_species_matrix$site_ID
+site_species_matrix <- site_species_matrix[ , -1]
+
+# Remove all-zero families
+keep <- colSums(site_species_matrix, na.rm = TRUE) > 0
+site_species_matrix <- site_species_matrix[, keep, drop = FALSE]
+
+# Build accumulation curve, use random as the method so sites are added randomly
+acc_site <- specaccum(site_species_matrix, method = "random", permutations = 1000)
+
+# Prepare tidy dataframe for plotting
+acc_site_df <- tibble(
+  sites = acc_site$sites,
+  richness = acc_site$richness,
+  se = acc_site$sd
+)
+
+# Plot
+carabid_species_accumulation <- ggplot(acc_site_df, aes(x = sites, y = richness)) +
+  geom_line(linewidth = 1) +
+  geom_errorbar(aes(ymin = richness - 1.96 * se,
+                    ymax = richness + 1.96 * se),
+                width = 0.3) +
+  labs(
+    x = "Number of sites",
+    y = "Number of carabid species observed") +
+  theme_minimal(base_size = 10)
+
+carabid_species_accumulation
+
+```
+
+Carabid species richness increased rapidly with the first few sites and continued to rise more gradually, without reaching an asymptotic, indicating that additional sampling may detect more species.
+
+Lets join the predictor variables for the model.
+
+```{r}
+# Full combined dataset (with predictor variables)
+carabid_df <- carabid_data_VY %>%
+  inner_join(predictor_variables, by = c("site_ID", "habitat", "year"))                    
+
+# Remove incomplete rows (sites missing predictor variable data)
+# convert others to factors
+carabid_df_clean <- carabid_df %>%
+  drop_na() %>%
+  mutate(
+    management_type = as.factor(management_type),
+    habitat         = factor(habitat, levels = c("CR", "DR")),
+    site_ID         = as.factor(site_ID),
+    trap_count      = as.numeric(trap_count),
+    year = as.factor(year),
+  )
+
+
+```
+
+### Descriptive stats
+
+```{r}
+# select carabid abundance and species richness columns
+vars_to_summarize <- carabid_df_clean %>%
+  dplyr::select(
+    carabid_abundance,
+    species_richness)
+
+# Keep only numeric variables for summary table
+numeric_vars <- vars_to_summarize %>% 
+  dplyr::select(where(is.numeric))
+
+# Compute summary statistics
+carabid_summary <- as.data.frame(
+  apply(numeric_vars, 2, function(x){
+    c(
+      mean   = mean(x, na.rm = TRUE),
+      sd     = sd(x, na.rm = TRUE),
+      min    = min(x, na.rm = TRUE),
+      max    = max(x, na.rm = TRUE),
+      median = median(x, na.rm = TRUE),
+      IQR    = IQR(x, na.rm = TRUE)
+    )
+  })
+)
+
+# Make rows readable
+carabid_summary
+```
+
+I also want to make summary tables for carabids by 1) management type, 2) habitat and 3) year
+
+
+```{r}
+# carabid abundance and richness summary stats
+response_summary_by <- function(data, group_var, group_label) {
+  data %>%
+    group_by({{ group_var }}) %>%
+    summarise(
+      carabid_abundance_mean   = mean(carabid_abundance,   na.rm = TRUE),
+      carabid_abundance_sd     = sd(carabid_abundance,     na.rm = TRUE),
+      carabid_abundance_min    = min(carabid_abundance,    na.rm = TRUE),
+      carabid_abundance_max    = max(carabid_abundance,    na.rm = TRUE),
+      carabid_abundance_median = median(carabid_abundance, na.rm = TRUE),
+      carabid_abundance_IQR    = IQR(carabid_abundance,    na.rm = TRUE),
+
+      carabid_rich_mean        = mean(species_richness,    na.rm = TRUE),
+      carabid_rich_sd          = sd(species_richness,      na.rm = TRUE),
+      carabid_rich_min         = min(species_richness,     na.rm = TRUE),
+      carabid_rich_max         = max(species_richness,     na.rm = TRUE),
+      carabid_rich_median      = median(species_richness,  na.rm = TRUE),
+      carabid_rich_IQR         = IQR(species_richness,     na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Level    = as.character({{ group_var }}), 
+      Grouping = group_label
+    ) %>%
+    dplyr::select(Grouping, Level, everything(), -{{ group_var }})
+}
+
+
+# 1) By management type
+summary_by_mgmt <- response_summary_by(
+  carabid_df_clean,
+  management_type,
+  "Management type"
+)
+
+# 2) By habitat
+summary_by_habitat <- response_summary_by(
+  carabid_df_clean,
+  habitat,
+  "Habitat"
+)
+
+# 3) By year
+summary_by_year <- response_summary_by(
+  carabid_df_clean,
+  year,
+  "Year"
+)
+
+# Combine into one long table
+carabid_response_summary_all <- bind_rows(
+  summary_by_mgmt,
+  summary_by_habitat,
+  summary_by_year
+)
+
+carabid_response_summary_all
+
+# save as table
+write.csv(
+  carabid_response_summary_all,
+  here::here("02_tables", "carabid_summary.csv"),
+  row.names = FALSE
+)
+
+```
+
+Carabid mean abundance and richness higher in organic vineyards, but also lots of variability. Carabid mean abundance on average higher vine rows compared to inter-rows, and higher in 2025 compared to 2024.
+
+
+### Data Exploration
+
+#### Carabid Abundance
+
+```{r}
+# ABUNDANCE
+## PART 1: Visualizations
+# Visualize response variable distribution
+carabid_abund_histo <- ggplot(carabid_df_clean, aes(x = carabid_abundance)) + 
+  geom_histogram(bins = 15, fill = "grey", color = "black") +
+  theme_minimal() + 
+  labs(title = "Carabid abundance", x = "Number of individuals", y = "Frequency")
+
+carabid_abund_histo
+
+# calculate abundance per trap
+carabid_VY_data <- carabid_df_clean %>%
+  mutate(
+    abundance_per_trap = carabid_abundance / trap_count
+  )
+
+# plot by management type
+carabid_abundance_management <- ggplot(
+  carabid_VY_data, 
+  aes(x = management_type, y = carabid_abundance, fill = management_type)
+) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  theme_minimal() +
+  scale_fill_manual(values = mgmt_colors, labels = c("Conventional", "Organic")) +
+  labs(
+    title = "Carabid abundance",
+    x = NULL,                 # remove x-axis label
+    y = "Carabid abundance"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, size = 12)  # center title
+  )
+
+
+carabid_abundance_management
+
+# plot carabid abundance by management type and habitat
+# let's use line plots to account for the paired design of vine rows/ interrows!
+carabid_abundance_habitat <- ggplot(carabid_VY_data, aes(
+  x = habitat,
+  y = carabid_abundance,
+  group = interaction(site_ID, year),
+  color = management_type
+)) +
+  geom_line(alpha = 0.5) +
+  geom_point(
+    aes(fill = management_type),
+    shape = 21, size = 3, stroke = 1.2
+  ) +
+  scale_x_discrete(labels = c("CR" = "Vine row", "DR" = "Inter-row")) +
+  scale_color_manual(values = c("conv" = "black", "org" = "#009E73")) +
+  scale_fill_manual(values = c("conv" = "white", "org" = "white")) +
+  labs(
+    title = "Carabid abundance",
+    x = NULL,
+    y = "Carabid abundance",
+    color = "Management",
+    fill = "Management"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+carabid_abundance_habitat 
+```
+
+Histogram is left skewed, a lot of values for carabid abundance less than 15, few over 20. 
+No obvious difference between management types, but organic has a few very high values.
+
+
+```{r}
+# plot carabid species richness by vegetation height
+ggplot(carabid_df_clean, aes(x = avg_veg_height, y = carabid_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation Height (cm)",
+    y = "Abundance",
+    title = "Abundance vs Vegetation Height"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot carabid species richness by vegetation cover
+ggplot(carabid_df_clean, aes(x = avg_veg_cover, y = carabid_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation Cover (%)",
+    y = "Abundance",
+    title = "Abundance vs Vegetation Cover"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot carabid species richness by vegetation richness
+ggplot(carabid_df_clean, aes(x = veg_richness, y = carabid_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation Richness",
+    y = "Abundance",
+    title = "Abundance vs Vegetation Richness"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot carabid abundance by natural area (500m)
+ggplot(carabid_df_clean, aes(x = total_natural_500, y = carabid_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Proportion Natural Habitat (500 m buffer)",
+    y = "Abundance",
+    title = "Abundance vs Natural Habitat (500 m)"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot carabid abundance by distance to natural area (500m)
+ggplot(carabid_df_clean, aes(x = distance_to_natural, y = carabid_abundance)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Distance to Natural Habitat",
+    y = "Carabid Abundance",
+    title = "Carabid Abundance vs Distance to Natural Habitat"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+
+Looks like there may be a trend of carabid abundance increasing with vegetation height. No other obvious trends.
+
+#### Carabid Species Richness
+
+```{r}
+# Visualize response variable distribution
+carabid_rich_histo <- ggplot(carabid_df_clean, aes(x = species_richness)) + 
+  geom_histogram(bins = 6, fill = "grey", color = "black") +
+  theme_minimal() + 
+  labs(title = "Carabid richness", x = "Number of species", y = "Frequency")
+
+carabid_rich_histo
+
+```
+
+Species richness between 0-8, most around 2.5
+
+
+```{r}
+# plot carabid species richness by management type
+carabid_richness_management <- ggplot(
+  carabid_VY_data, 
+  aes(x = management_type, y = species_richness, fill = management_type)
+) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  theme_minimal() +
+  scale_fill_manual(values = mgmt_colors, labels = c("Conventional", "Organic")) +
+  labs(
+    title = "Carabid richness",
+    x = NULL,                 # remove x-axis label
+    y = "Species richness"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, size = 12)  # center title
+  )
+
+carabid_richness_management
+
+# plot carabid richness by management type and habitat
+# let's use line plots to account for the paired design of vine rows/ interrows!
+carabid_richness_habitat <- ggplot(carabid_VY_data, aes(
+  x = habitat,
+  y = species_richness,
+  group = interaction(site_ID, year),
+  color = management_type
+)) +
+  geom_line(alpha = 0.5) +
+  geom_point(
+    aes(fill = management_type),
+    shape = 21, size = 3, stroke = 1.2
+  ) +
+  scale_x_discrete(labels = c("CR" = "Vine row", "DR" = "Inter-row")) +
+  scale_color_manual(values = c("conv" = "black", "org" = "#009E73")) +
+  scale_fill_manual(values = c("conv" = "white", "org" = "white")) +
+  labs(
+    title = "Carabid richness",
+    x = NULL,
+    y = "Carabid richness",
+    color = "Management",
+    fill = "Management"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+carabid_richness_habitat
+```
+
+No obvious difference in species richness by management type. 
+
+```{r}
+# plot carabid species richness by vegetation height
+ggplot(carabid_df_clean, aes(x = avg_veg_height, y = species_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation Height (cm)",
+    y = "Species Richness",
+    title = "Species Richness vs Vegetation Height"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot carabid species richness by vegetation cover
+ggplot(carabid_df_clean, aes(x = avg_veg_cover, y = species_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation Cover (%)",
+    y = "Species Richness",
+    title = "Species Richness vs Vegetation Cover"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot carabid species richness by vegetation richness
+ggplot(carabid_df_clean, aes(x = veg_richness, y = species_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Vegetation Richness",
+    y = "Species Richness",
+    title = "Species Richness vs Vegetation Richness"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot spider abundance by natural area (500m)
+ggplot(carabid_df_clean, aes(x = total_natural_500, y = species_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Proportion Natural Habitat (500 m buffer)",
+    y = "Species Richness",
+    title = "Species Richness vs Natural Habitat (500 m)"
+  ) +
+  theme_minimal(base_size = 13)
+
+# plot carabid richness by distance to natural area (500m)
+ggplot(carabid_df_clean, aes(x = distance_to_natural, y = species_richness)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(
+    x = "Distance to Natural Habitat",
+    y = "Species Richness",
+    title = "Carabid Richness vs Distance to Natural Habitat"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+## FIGURES
+
+Let's combine some figures from all of the response and predictor variables to include in my thesis/ papers.
+
+First let's combine the vegetation variables by habitat/ management type: 
+```{r}
+
+# make a single legend for the plot
+habitat_legend <- cowplot::get_legend(
+  veg_cover_mgmt +
+    labs(fill = "Management", color = "Management") +  
+    theme(legend.position = "right")
+)
+
+
+# remove other legends
+veg_cover_mgmt <- veg_cover_mgmt + theme(legend.position = "none")
+veg_height_mgmt <- veg_height_mgmt + theme(legend.position = "none")
+veg_richness_mgmt <- veg_richness_mgmt + theme(legend.position = "none")
+
+# combine into one plot using cow plot
+combined_veg_plots <- cowplot::plot_grid(
+  veg_cover_mgmt,
+  veg_height_mgmt,
+  veg_richness_mgmt,
+  labels = c("A", "B", "C"),
+  label_size = 10,
+  ncol = 2,
+  align = "v"
+)
+
+# Add legend to the right
+final_veg_fig <- cowplot::plot_grid(
+  combined_veg_plots,
+  habitat_legend,
+  rel_widths = c(1, 0.15)
+)
+
+final_veg_fig
+
+# save to figures folder
+ggsave(
+  filename = here::here("03_figures", "veg_line_plots.png"),
+  plot = final_veg_fig,
+  width = 7,      
+  height = 5,     
+  dpi = 300       # high-resolution
+)
+
+
+```
+
+
+
+Let's also combine the spider and carabid abundance and site occupancy plots.
+
+```{r fig.height=8, fig.width=7}
+# abundance and site occupancy 
+abundance_occupancy_plots <- cowplot::plot_grid(spider_abund_vy, spider_occupancy_vy, genus_abund_vy, genus_site_occupancy_vy, labels = c('A', 'B','C', 'D'),
+  label_size = 10,
+  ncol = 2
+)
+
+abundance_occupancy_plots
+
+# save to figures folder
+ggsave(
+  filename = here::here("03_figures", "abundance_occupancy_plots.png"),
+  plot = abundance_occupancy_plots,
+  width = 7,      
+  height = 8,     
+  dpi = 300       # high-resolution
+)
+
+```
+
+And the accumulation curves. 
+
+```{r fig.height=7, fig.width=7}
+# accumulation curves
+accumulation_curves <- cowplot::plot_grid(spider_family_accumulation, carabid_species_accumulation, labels = c('A', 'B'),
+  label_size = 10,
+  ncol = 1
+)
+
+accumulation_curves 
+
+# save to figures folder
+ggsave(
+  filename = here::here("03_figures", "accumulation_curves.png"),
+  plot = accumulation_curves,
+  width = 7,      
+  height = 7,     
+  dpi = 300       # high-resolution
+)
+
+
+```
+
+
+All the response variable histograms
+
+```{r}
+# combine all management plots into one
+# response variables
+response_histo <- cowplot::plot_grid(spider_abund_histo, spider_richness_histo, carabid_abund_histo, carabid_rich_histo, labels = c('A', 'B', 'C', 'D'), label_size = 10)
+
+response_histo
+
+# save to figures folder
+ggsave(
+  filename = here::here("03_figures", "response_histograms.png"),
+  plot = response_histo,
+  width = 8,      
+  height = 6,     
+  dpi = 300       # high-resolution
+)
+
+```
+
+
+Let's also make some combined boxplots to explore response variables by management type
+
+```{r}
+# combine all management plots into one
+# response variables
+cowplot::plot_grid(spider_abundance_management, spider_richness_management, carabid_abundance_management, carabid_richness_management, labels = c('A', 'B', 'C', 'D'), label_size = 10)
+
+
+```
+```{r}
+# combine line plots to explore response variables by management type and habitat
+
+# make a single legend for the plot
+habitat_legend <- cowplot::get_legend(
+  spider_abundance_habitat +
+    labs(fill = "Management", color = "Management") +  
+    theme(legend.position = "right")
+)
+
+# remove other legends
+spider_abundance_habitat <- spider_abundance_habitat + theme(legend.position = "none")
+spider_richness_habitat <- spider_richness_habitat + theme(legend.position = "none")
+carabid_abundance_habitat <- carabid_abundance_habitat + theme(legend.position = "none")
+carabid_richness_habitat <- carabid_richness_habitat + theme(legend.position = "none")
+
+# combine into one plot
+combined_habitat_plots <- cowplot::plot_grid(
+  spider_abundance_habitat,
+  spider_richness_habitat,
+  carabid_abundance_habitat,
+  carabid_richness_habitat,
+  labels = c("A", "B", "C", "D"),
+  label_size = 10,
+  ncol = 2,
+  align = "v"
+)
+
+# Add legend to the right
+final_habitat_fig <- cowplot::plot_grid(
+  combined_habitat_plots,
+  habitat_legend,
+  rel_widths = c(1, 0.15)
+)
+
+final_habitat_fig
+
+# save to figures folder
+ggsave(
+  filename = here::here("03_figures", "management_lineplot.png"),
+  plot = final_habitat_fig,
+  width = 8,      
+  height = 6,     
+  dpi = 300       # high-resolution
+)
+```
+
+
+## GLMM's
+
+### Management models
+First let's fit models using management type, habitat and year as predictors.
+
+#### Spider abundance
+
+Let's try fitting a GLMM model using poisson distribution first (appropriate for count data).
+
+```{r}
+# Fit GLMM model (using Poisson first, then check for overdispersion)
+# include site as random effect and offset to account for traps destroyed in field
+spider_abund_mgmt_poisson <- glmmTMB(
+  spider_abundance ~  management_type + habitat + year + (1 | site_ID) + 
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = "poisson"
+)
+
+# Check the summary of the model
+summary(spider_abund_mgmt_poisson)
+
+```
+
+
+Let's check to see if the model meets the assumptions by evaluating the residuals using DHARMa package
+
+```{r}
+# NORMALITY OF RESIDUALS
+# Model diagnostics
+residuals_poisson <- simulateResiduals(spider_abund_mgmt_poisson)
+plot(residuals_poisson)
+
+```
+
+Problems with the residuals, lets switch to negative binomial. 
+
+```{r}
+# problems detected, switch to negative binomial
+# use scaled continuous variables to make comparisons based on effect size
+spider_abund_mgmt_nb <- glmmTMB(
+  spider_abundance ~ management_type + habitat + year + (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = "nbinom1"
+)
+
+# Check the summary of the model
+summary(spider_abund_mgmt_nb)
+
+# Check performance (marginal and condition R-squared)
+performance::r2(spider_abund_mgmt_nb)
+
+```
+
+
+
+##### Meeting model assumptions
+```{r}
+# Model diagnostics
+spider_residuals_nb <- simulateResiduals(spider_abund_mgmt_nb)
+plot(spider_residuals_nb)
+```
+
+
+Residuals look good! Conditional R2 0.74, marginal 0.33. Not bad, random and fixed effects explaining quite a bit of the variability in the data.
+
+Let's check for colinearity of the predictor variables and spatial autocorrelation in residuals to verify independence of sampling points.
+
+```{r}
+# INDEPENDENCE
+
+# Check for outliers/ influential values
+DHARMa::testOutliers(spider_abund_mgmt_nb)
+
+
+# Check for spatial autocorrelation
+# prepare coordinates
+coords <- coords %>%
+  mutate(
+    site_ID = as.character(site_ID),
+    long = as.numeric(gsub("c\\(|\\)", "", as.character(long))),
+    lat  = as.numeric(as.character(lat))
+  ) %>%
+  filter(!is.na(lat), !is.na(long)) %>%
+  distinct(site_ID, .keep_all = TRUE)          # one row per site
+
+# test using dharma
+# Make sure site_ID types match and join to model data
+data_dharma_spider <- spider_df_clean %>%
+  mutate(site_ID = as.character(site_ID)) %>%
+  left_join(coords, by = "site_ID")
+
+# Simulate DHARMa residuals
+sim_res_spider <- simulateResiduals(spider_abund_mgmt_nb, plot = FALSE)
+
+# recalculate per site
+sim_res_site_spider <- recalculateResiduals(sim_res_spider, group = data_dharma_spider$site_ID)
+
+# aggregate coordinates by site
+coords_site_spider <- data_dharma_spider %>%
+  group_by(site_ID) %>%
+  summarise(
+    long = first(long),
+    lat  = first(lat),
+    .groups = "drop"
+  ) %>%
+  arrange(site_ID)
+
+# Spatial autocorrelation test (coords repeated for each observation at same site)
+testSpatialAutocorrelation(
+  sim_res_site_spider,
+  x = coords_site_spider$long,
+  y = coords_site_spider$lat
+)
+
+```
+No significant residual outliers
+
+No spatial autocorrelation detected based on DHARMa Moran's I.
+
+Model meets independence assumptions.
+
+##### Model outputs
+
+Make a figure displaying the model results with confidence intervals.
+
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_spider_abund_mgmt <- tidy(spider_abund_mgmt_nb, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "management_typeorg"   = "Management: Organic",
+                               "habitatDR"            = "Inter-row Habitat",
+                               "year"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+# plot GLMM model fixed effects
+p_log_spider_abund_mgmt <- ggplot(fx_spider_abund_mgmt, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = NULL, y = NULL,
+       title = "Spider Abundance") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_spider_abund_mgmt
+
+```
+
+
+Organic management and year significant, but lots of variability (wide confidence intervals)
+
+
+#### Spider richness
+
+```{r}
+# Fit GLMM with interaction
+spider_richness_mgmt_poisson <- glmmTMB(
+  family_richness ~ management_type + habitat + year + (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = "poisson",
+  na.action = na.fail
+)
+
+
+summary(spider_richness_mgmt_poisson)
+
+```
+
+##### Meeting model assumptions
+
+```{r}
+# Diagnostics with DHARMa
+sim_res_rich <- simulateResiduals(spider_richness_mgmt_poisson)
+plot(sim_res_rich)              # QQ + residual vs predicted
+testDispersion(sim_res_rich)
+
+```
+
+Dipsersion problems detected, lets switch to conway-maxwell to deal with underdispersion.
+
+```{r}
+# significant problems detected, lets try conway-maxwell to deal with underdispersion
+# add an optimizer to tell it to still run (even if it takes a long time!)
+spider_richness_mgmt_compois <- glmmTMB(
+  family_richness ~ management_type + habitat + year + (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = compois(),
+  control = glmmTMBControl(
+    optimizer = optim,
+    optArgs = list(method = "BFGS"),
+    profile = TRUE
+  )
+)
+
+
+summary(spider_richness_mgmt_compois)
+
+```
+
+
+```{r}
+# Check residuals
+spider_residuals_compois <- simulateResiduals(spider_richness_mgmt_compois)
+plot(spider_residuals_compois)
+
+
+# Check performance (marginal and condition R-squared)
+performance::r2(spider_richness_mgmt_compois)
+
+# Check for outliers/ influential values
+DHARMa::testOutliers(spider_residuals_compois)
+
+```
+
+
+Residuals look okay! 
+
+Marginal R2 suggests that richness is fairly random across sites, and predictors don’t add much explanatory power.
+
+
+##### Model outputs
+Let's make another plot looking at the model outputs
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_spider_richness_mgmt <- tidy(spider_richness_mgmt_compois, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "management_typeorg"   = "Management: Organic",
+                               "habitatDR"            = "Inter-row Habitat",
+                               "year"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+# plot GLMM model fixed effects
+p_log_spider_richness_mgmt <- ggplot(fx_spider_richness_mgmt, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Spider Richness"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+
+p_log_spider_richness_mgmt
+
+
+```
+
+Also a difference in family richness by management type and year. 
+
+
+#### Carabid abundance
+
+```{r}
+## FITTING MODELS
+# Fit GLMM model (using Poisson first, then check for overdispersion)
+#Site as random effect
+carabid_abund_poisson <- glmmTMB(
+  carabid_abundance ~ management_type + habitat + year + (1 | site_ID) + 
+    offset(log(trap_count)),
+  data = carabid_df_clean,
+  family = "poisson",
+  na.action = na.fail
+)
+
+summary(carabid_abund_poisson)
+
+# Check performance (marginal and condition R-squared)
+performance::r2(carabid_abund_poisson)
+```
+
+##### Meeting Model Assumptions
+
+```{r}
+
+# check residuals and collinearity
+residuals_poisson <- simulateResiduals(carabid_abund_poisson)
+plot(residuals_poisson)
+
+
+```
+
+```{r}
+# switch to negative binomial
+#Site as random effect
+carabid_abund_mgmt_nb <- glmmTMB(
+  carabid_abundance ~ management_type + habitat + year + (1 | site_ID) + 
+    offset(log(trap_count)),
+  data = carabid_df_clean,
+  family = "nbinom1",
+  na.action = na.fail
+)
+
+summary(carabid_abund_mgmt_nb)
+
+# check residuals
+carabid_residuals_nb <- simulateResiduals(carabid_abund_mgmt_nb)
+plot(carabid_residuals_nb)
+
+# check collinearity
+performance::check_collinearity(carabid_abund_mgmt_nb)
+
+# Check for outliers/ influential values
+DHARMa::testOutliers(carabid_residuals_nb)
+
+# check perforamnce (r2)
+performance::r2(carabid_abund_mgmt_nb)
+```
+
+Residuals for negative binomial model look good, low correlation between predictor variables and marginal R2 ~0.2. Not bad!
+
+No evidence of influential outliers in residuals. 
+
+```{r}
+
+# Testing for spatial autocorrelation
+# test using dharma
+# Make sure site_ID types match and join to model data
+data_dharma_carabids <- carabid_df_clean %>%
+  mutate(site_ID = as.character(site_ID)) %>%
+  left_join(coords, by = "site_ID")
+
+# Simulate DHARMa residuals
+sim_res_carabids <- simulateResiduals(carabid_abund_mgmt_nb, plot = FALSE)
+
+# recalculate per site
+sim_res_site_carabids <- recalculateResiduals(sim_res_carabids, group = data_dharma_carabids$site_ID)
+
+# aggregate coordinates by site
+coords_site_carabids <- data_dharma_carabids %>%
+  group_by(site_ID) %>%
+  summarise(
+    long = first(long),
+    lat  = first(lat),
+    .groups = "drop"
+  ) %>%
+  arrange(site_ID)
+
+# Spatial autocorrelation test (coords repeated for each observation at same site)
+testSpatialAutocorrelation(
+  sim_res_site_carabids,
+  x = coords_site_carabids$long,
+  y = coords_site_carabids$lat
+)
+```
+
+##### Model outputs
+
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_carabid_abund_mgmt <- tidy(carabid_abund_mgmt_nb, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "management_typeorg"   = "Management: Organic",
+                               "habitatDR"            = "Inter-row Habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+# plot GLMM model fixed effects
+p_log_carabid_mgmt_abund <- ggplot(fx_carabid_abund_mgmt, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = NULL, y = NULL,
+       title = "Carabid Abundance") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+
+p_log_carabid_mgmt_abund
+
+
+```
+
+
+
+#### Carabid richness
+
+```{r}
+# Fit GLMM model (using Poisson first, then check for overdispersion)
+#Site as random effect
+carabid_richness_mgmt_poisson <- glmmTMB(
+  species_richness ~ management_type + habitat + + year + (1 | site_ID) + 
+    offset(log(trap_count)),
+  data = carabid_df_clean,
+  family = "poisson",
+  na.action = na.fail
+)
+
+summary(carabid_richness_mgmt_poisson)
+
+
+```
+
+
+
+##### Meeting model assumptions
+
+```{r}
+# Check residuals
+carabid_residuals_poisson <- DHARMa::simulateResiduals(carabid_richness_mgmt_poisson)
+plot(carabid_residuals_poisson)
+
+# residuals look fine!
+
+# Check for outliers/ influential values
+DHARMa::testOutliers(carabid_residuals_poisson)
+
+# Check performance (marginal and condition R-squared)
+performance::r2(carabid_richness_mgmt_poisson)
+```
+
+Residuals look okay!
+
+No evidence of influential outliers in residuals. 
+
+Conditional R2 ~0.2, which means some of the variability is explained by between site differences. 
+Marginal R2 very low (0.02) which means predictor variables have very little explanatory power. 
+
+
+
+```{r}
+# Testing for spatial autocorrelation
+# test using dharma
+# Simulate DHARMa residuals
+sim_res_carabid_rich <- simulateResiduals(carabid_richness_mgmt_poisson, plot = FALSE)
+
+# recalculate per site
+sim_res_site_carabid_rich <- recalculateResiduals(sim_res_carabid_rich, group = data_dharma_carabids$site_ID)
+
+# aggregate coordinates by site
+coords_site_carabids <- data_dharma_carabids %>%
+  group_by(site_ID) %>%
+  summarise(
+    long = first(long),
+    lat  = first(lat),
+    .groups = "drop"
+  ) %>%
+  arrange(site_ID)
+
+# Spatial autocorrelation test (coords repeated for each observation at same site)
+testSpatialAutocorrelation(
+  sim_res_site_carabid_rich,
+  x = coords_site_carabids$long,
+  y = coords_site_carabids$lat
+)
+
+```
+
+No evidence of spatial autocorrelation or influential residual outliers
+
+##### Model outputs
+
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_carabid_richness_mgmt <- tidy(carabid_richness_mgmt_poisson, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "year2025"             = "Year: 2025",
+                               "management_typeorg"   = "Management: Organic",
+                               "habitatDR"            = "Inter-row Habitat",
+    ),
+    sig = p.value < 0.05
+  )
+
+# plot GLMM model fixed effects
+p_log_carabid_richness_mgmt <- ggplot(fx_carabid_richness_mgmt, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = NULL, y = NULL,
+       title = "Carabid Richness") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank()
+        )
+
+p_log_carabid_richness_mgmt
+
+
+```
+
+No significant predictors for carabid richness, all confidence intervals cross 0 and are very wide!
+
+
+### Local and landscape models
+
+#### Spider abundance
+Now let's model the local vegetation and landscape heterogeneity variables
+
+```{r}
+# full model (both years)
+spider_abund_poisson <- glmmTMB(
+  spider_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural + year +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = poisson
+)
+summary(spider_abund_poisson)
+residuals_spider_abund_poisson <- simulateResiduals(spider_abund_poisson)
+plot(residuals_spider_abund_poisson)
+
+# switch to negative binomial
+# full model (both years)
+spider_abund_nb <- glmmTMB(
+  spider_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural + year +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = nbinom2()
+)
+
+```
+##### Meeting model assumptions
+
+```{r}
+# Check residuals
+summary(spider_abund_nb)
+residuals_spider_abund_nb <- simulateResiduals(spider_abund_nb)
+plot(residuals_spider_abund_nb)
+```
+
+Residuals look good!
+
+##### Model outputs
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_spider_abund <- tidy(spider_abund_nb, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+# plot GLMM model fixed effects
+p_log_abund_spider <- ggplot(fx_spider_abund, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = "Estimate (log scale)", y = NULL,
+       title = "Spider abundance GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_abund_spider
+```
+
+
+
+
+##### Sensitivity analysis: year
+
+Next we'll filter datasets for 2024 and 2025, and run the models separately for each year.
+
+```{r}
+# filter to only 2024 data
+spider_data_2024 <- spider_df_clean %>%
+  filter(year==2024)
+
+# filter to only 2025 data
+spider_data_2025 <- spider_df_clean %>%
+  filter(year==2025)
+```
+
+```{r}
+# model 2024 data
+spider_abund_2024 <- glmmTMB(
+  spider_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_data_2024,
+  family = poisson
+)
+summary(spider_abund_2024)
+residuals_2024 <- simulateResiduals(spider_abund_2024)
+plot(residuals_2024)
+
+# Tidy fixed effects with 95% CIs (log scale)
+fx_abund_spider_2024 <- tidy(spider_abund_2024, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+
+# plot GLMM model fixed effects
+p_log_abund_spider_2024 <- ggplot(fx_abund_spider_2024, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = "Estimate (log scale)", y = NULL,
+       title = "2024 Spider Abundance GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_abund_spider_2024
+
+
+# model 2025 data
+spider_abund_2025 <- glmmTMB(
+  spider_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_data_2025,
+  family = poisson
+)
+summary(spider_abund_2025)
+residuals_2025 <- simulateResiduals(spider_abund_2025)
+plot(residuals_2025)
+
+# Tidy fixed effects with 95% CIs (log scale)
+fx_abund_spider_2025 <- tidy(spider_abund_2025, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+
+# plot GLMM model fixed effects
+p_log_abund_spider_2025 <- ggplot(fx_abund_spider_2025, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = NULL, y = NULL,
+       title = "2025 Spider Abundance GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_abund_spider_2025
+
+
+```
+
+2024: vegetation cover and height positive effect, richness negative. 
+
+2025: vegetation richness positive effect, vegetation cover negative. 
+
+
+##### Sensitivity analysis: landscape scale
+
+We'll check and see if any of the different scales (100-1000m) impact the response variables
+
+
+Next we'll fit models for each of the different scales
+```{r}
+# Define the scales
+scales <- c(100, 250, 500, 750, 1000)
+
+# identify columns
+nat_cols <- paste0("z_total_natural_", scales)
+nat_cols
+# [1] "z_total_natural_100" ... etc
+
+# Build a function to fit the model for a given natural-cover scale
+spider_abund_scale <- function(nat_col, data = spider_df_clean) {
+
+  # Create the formula programmatically so only nat_col changes
+  f <- as.formula(paste(
+    "spider_abundance ~",
+    "z_veg_height + z_veg_cover + z_veg_richness +",
+    nat_col, "+ z_distance_natural + year +",
+    "(1 | site_ID) + offset(log(trap_count))"
+  ))
+
+  glmmTMB(
+    formula = f,
+    data = data,
+    family = nbinom2()
+  )
+}
+
+# Fit all scales 
+spider_abund_fit <- setNames(
+  lapply(nat_cols, spider_abund_scale),
+  paste0(scales, "m")
+)
+
+# Compare model fit across scales (AIC) 
+spider_abund_aic <- tibble(
+  scale = names(spider_abund_fit),
+  AIC = sapply(spider_abund_fit, AIC)
+) %>%
+  arrange(AIC) %>%
+  mutate(delta_AIC = AIC - min(AIC))
+
+spider_abund_aic
+
+# Extract the effect of "total natural" at each scale (estimate + CI)
+# This pulls the coefficient that matches the nat_col used in each model.
+spider_abund_coef <- imap_dfr(spider_abund_fit, function(mod, scale_nm){
+
+  nat_term <- paste0("z_total_natural_", sub("m", "", scale_nm))
+
+  broom.mixed::tidy(mod, effects = "fixed", conf.int = TRUE) %>%
+    filter(term == nat_term) %>%
+    mutate(scale = scale_nm) %>%
+    select(scale, term, estimate, conf.low, conf.high, std.error, statistic, p.value)
+})
+
+spider_abund_coef %>% arrange(as.numeric(sub("m","", scale)))
+
+# quick DHARMa residual diagnostics across scales
+dharma_res <- imap(spider_abund_fit, ~simulateResiduals(.x, n = 1000))
+
+# Plot each
+walk2(dharma_res, names(dharma_res), ~{
+  plot(.x, main = paste("DHARMa residuals:", .y), cex.main = 0.9)
+})
+
+```
+
+Proportion of natural habitat not an important predictor at any scale. 
+No difference between scales based on AIC (delta AIC <2)
+
+#### Spider family richness
+
+```{r}
+# Fit GLMM with interaction
+spider_richness_poisson <- glmmTMB(
+  family_richness ~ management_type + habitat + z_veg_height + z_veg_cover + z_veg_richness + z_total_natural_500 + year + (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = "poisson",
+  na.action = na.fail
+)
+
+
+summary(spider_richness_poisson)
+
+```
+
+Problems detected, lets switch to conway-maxwell to deal with underdispersion.
+
+```{r}
+# Fit GLMM with conway maxwell, optimize so it doesn't quit
+spider_richness_compois <- glmmTMB(
+  family_richness ~ z_veg_height + z_veg_cover + z_veg_richness + z_total_natural_500 + z_distance_natural + year + (1 | site_ID) + 
+    offset(log(trap_count)),
+  data = spider_df_clean,
+  family = compois(),
+  control = glmmTMBControl(
+    optimizer = optim,
+    optArgs = list(method = "BFGS"),
+    profile = TRUE
+  )
+)
+
+
+summary(spider_richness_compois)
+
+
+```
+##### Meeting model assumptions
+
+```{r}
+# Check residuals
+spider_residuals_compois <- simulateResiduals(spider_richness_compois)
+plot(spider_residuals_compois)
+
+
+# Check performance (marginal and condition R-squared)
+performance::r2(spider_richness_compois)
+```
+
+
+##### Model outputs
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_spider_richness <- tidy(spider_richness_compois, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+# plot GLMM model fixed effects
+p_log_spider_richness <- ggplot(fx_spider_richness, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Spider Richness"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+
+p_log_spider_richness
+
+
+```
+
+##### Sensitivity analysis: year
+
+```{r}
+# model 2024 data
+spider_richness_2024 <- glmmTMB(
+  family_richness ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_data_2024,
+  family = compois()
+)
+summary(spider_richness_2024)
+residuals_2024 <- simulateResiduals(spider_richness_2024)
+plot(residuals_2024)
+
+# Tidy fixed effects with 95% CIs (log scale)
+fx_richness_spider_2024 <- tidy(spider_richness_2024, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+
+# plot GLMM model fixed effects
+p_log_richness_spider_2024 <- ggplot(fx_richness_spider_2024, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = "Estimate (log scale)", y = NULL,
+       title = "2024 Spider Abundance GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_richness_spider_2024
+
+
+# model 2025 data
+spider_richness_2025 <- glmmTMB(
+  family_richness ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = spider_data_2025,
+  family = compois
+)
+summary(spider_richness_2025)
+residuals_2025 <- simulateResiduals(spider_richness_2025)
+plot(residuals_2025)
+
+# Tidy fixed effects with 95% CIs (log scale)
+fx_richness_spider_2025 <- tidy(spider_richness_2025, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+
+# plot GLMM model fixed effects
+p_log_richness_spider_2025 <- ggplot(fx_richness_spider_2025, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = NULL, y = NULL,
+       title = "2025 Spider Richness GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_richness_spider_2025
+
+
+```
+
+
+##### Sensitivity analysis: landscape scale
+
+
+```{r}
+
+# Build a function to fit the model for a given natural-cover scale
+spider_richness_scale <- function(nat_col, data = spider_df_clean) {
+
+  # Create the formula programmatically so only nat_col changes
+  f <- as.formula(paste(
+    "family_richness ~",
+    "z_veg_height + z_veg_cover + z_veg_richness +",
+    nat_col, "+ z_distance_natural + year +",
+    "(1 | site_ID) + offset(log(trap_count))"
+  ))
+
+  glmmTMB(
+    formula = f,
+    data = data,
+    family = compois(),
+  control = glmmTMBControl(
+    optimizer = optim,
+    optArgs = list(method = "BFGS"),
+    profile = TRUE
+  )
+)
+}
+
+# Fit all scales 
+spider_richness_fit <- setNames(
+  lapply(nat_cols, spider_richness_scale),
+  paste0(scales, "m")
+)
+
+# Compare model fit across scales (AIC) 
+spider_richness_aic <- tibble(
+  scale = names(spider_richness_fit),
+  AIC = sapply(spider_richness_fit, AIC)
+) %>%
+  arrange(AIC) %>%
+  mutate(delta_AIC = AIC - min(AIC))
+
+spider_richness_aic
+
+# Extract the effect of "total natural" at each scale (estimate + CI)
+# This pulls the coefficient that matches the nat_col used in each model.
+spider_richness_coef <- imap_dfr(spider_richness_fit, function(mod, scale_nm){
+
+  nat_term <- paste0("z_total_natural_", sub("m", "", scale_nm))
+
+  broom.mixed::tidy(mod, effects = "fixed", conf.int = TRUE) %>%
+    filter(term == nat_term) %>%
+    mutate(scale = scale_nm) %>%
+    select(scale, term, estimate, conf.low, conf.high, std.error, statistic, p.value)
+})
+
+spider_richness_coef %>% arrange(as.numeric(sub("m","", scale)))
+
+# quick DHARMa residual diagnostics across scales
+dharma_res <- imap(spider_richness_fit, ~simulateResiduals(.x, n = 1000))
+
+# Plot each
+walk2(dharma_res, names(dharma_res), ~{
+  plot(.x, main = paste("DHARMa residuals:", .y))
+})
+```
+
+Proportion of natural habitat not an important predictor at any scale. 
+No difference between scales based on AIC (delta AIC <2)
+
+
+#### Carabid abundance
+
+```{r}
+# full model (both years)
+carabid_abund_poisson <- glmmTMB(
+  carabid_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural + year +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = carabid_df_clean,
+  family = poisson
+)
+summary(carabid_abund_poisson)
+residuals_carabid_abund <- simulateResiduals(carabid_abund_poisson)
+plot(residuals_carabid_abund)
+
+# switch to negative binomial
+carabid_abund_nb <- glmmTMB(
+  carabid_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural + year +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = carabid_df_clean,
+  family = nbinom1
+)
+```
+##### Meeting model assumptions
+
+```{r}
+# check residuals
+summary(carabid_abund_nb)
+residuals_carabid_abund <- simulateResiduals(carabid_abund_nb)
+plot(residuals_carabid_abund)
+```
+
+
+
+
+
+##### Model outputs
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_carabid_abund <- tidy(carabid_abund_nb, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+# plot GLMM model fixed effects
+p_log_abund_carabid <- ggplot(fx_carabid_abund, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = "Estimate (log scale)", y = NULL,
+       title = "Carabid Abundance GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_abund_carabid
+```
+
+
+##### Sensitivity analysis: year
+
+
+```{r}
+# filter to only 2024 data
+carabid_data_2024 <- carabid_df_clean %>%
+  filter(year==2024)
+
+# filter to only 2025 data
+carabid_data_2025 <- carabid_df_clean %>%
+  filter(year==2025)
+```
+
+```{r}
+# model 2024 data
+carabid_abund_2024 <- glmmTMB(
+  carabid_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural +
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = carabid_data_2024,
+  family = poisson
+)
+summary(carabid_abund_2024)
+residuals_2024 <- simulateResiduals(carabid_abund_2024)
+plot(residuals_2024)
+
+# Tidy fixed effects with 95% CIs (log scale)
+fx_abund_carabid_2024 <- tidy(carabid_abund_2024, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+
+
+# plot GLMM model fixed effects
+p_log_abund_carabid_2024 <- ggplot(fx_abund_carabid_2024, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = "Estimate (log scale)", y = NULL,
+       title = "2024 Carabid Abundance GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_abund_carabid_2024
+```
+
+```{r}
+# model 2025 data
+carabid_abund_2025 <- glmmTMB(
+  carabid_abundance ~ 
+    z_veg_height + z_veg_cover + z_veg_richness +
+    z_total_natural_500 + z_distance_natural + 
+    (1 | site_ID) +
+    offset(log(trap_count)),
+  data = carabid_data_2025,
+  family = poisson
+)
+summary(carabid_abund_2025)
+residuals_2025 <- simulateResiduals(carabid_abund_2025)
+plot(residuals_2025)
+
+# Tidy fixed effects with 95% CIs (log scale)
+fx_abund_carabid_2025 <- tidy(carabid_abund_2025, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+# plot GLMM model fixed effects
+p_log_abund_carabid_2025 <- ggplot(fx_abund_carabid_2025, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = "Estimate (log scale)", y = NULL,
+       title = "2025 Carabid Abundance GLMM",
+       caption = "Points and 95% CIs; darker = p < 0.05") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_log_abund_carabid_2025
+```
+
+
+2024: veg richness negative effect, vegetation height and proportion natural habitat (500m) positive effect
+
+2025: veg richness and height positive effect, cover negative
+
+
+##### Sensitivity analysis: landscape scale
+
+```{r}
+
+# Build a function to fit the model for a given natural-cover scale
+carabid_abund_scale <- function(nat_col, data = carabid_df_clean) {
+
+  # Create the formula programmatically so only nat_col changes
+  f <- as.formula(paste(
+    "carabid_abundance ~",
+    "z_veg_height + z_veg_cover + z_veg_richness +",
+    nat_col, "+ z_distance_natural + year +",
+    "(1 | site_ID) + offset(log(trap_count))"
+  ))
+
+  glmmTMB(
+    formula = f,
+    data = data,
+    family = nbinom1()
+  )
+}
+
+# Fit all scales 
+carabid_abund_fit <- setNames(
+  lapply(nat_cols, carabid_abund_scale),
+  paste0(scales, "m")
+)
+
+# Compare model fit across scales (AIC) 
+carabid_abund_aic <- tibble(
+  scale = names(carabid_abund_fit),
+  AIC = sapply(carabid_abund_fit, AIC)
+) %>%
+  arrange(AIC) %>%
+  mutate(delta_AIC = AIC - min(AIC))
+
+carabid_abund_aic
+
+# Extract the effect of "total natural" at each scale (estimate + CI)
+# This pulls the coefficient that matches the nat_col used in each model.
+carabid_abund_coef <- imap_dfr(carabid_abund_fit, function(mod, scale_nm){
+
+  nat_term <- paste0("z_total_natural_", sub("m", "", scale_nm))
+
+  broom.mixed::tidy(mod, effects = "fixed", conf.int = TRUE) %>%
+    filter(term == nat_term) %>%
+    mutate(scale = scale_nm) %>%
+    select(scale, term, estimate, conf.low, conf.high, std.error, statistic, p.value)
+})
+
+carabid_abund_coef %>% arrange(as.numeric(sub("m","", scale)))
+```
+
+Proportion of natural habitat not an important predictor at any scale. 
+No difference between scales based on AIC (delta AIC <2)
+
+#### Carabid Species Richness
+```{r}
+# Fit GLMM model (using Poisson first, then check for overdispersion)
+#Site as random effect
+carabid_richness_poisson <- glmmTMB(
+  species_richness ~ z_veg_height + z_veg_cover + z_veg_richness + z_total_natural_500 + z_distance_natural + year + (1 | site_ID) + 
+    offset(log(trap_count)),
+  data = carabid_df_clean,
+  family = "poisson",
+  na.action = na.fail
+)
+
+summary(carabid_richness_poisson)
+
+
+```
+
+
+
+##### Meeting model assumptions
+
+```{r}
+# Check residuals
+carabid_residuals_poisson <- DHARMa::simulateResiduals(carabid_richness_poisson)
+plot(carabid_residuals_poisson)
+
+
+
+# Check performance (marginal and condition R-squared)
+performance::r2(carabid_richness_poisson)
+```
+Residuals look okay!
+
+No evidence of influential outliers in residuals. 
+
+Conditional R2 ~0.21, which means some of the variability is explained by between site differences. 
+Marginal R2 very low (0.04) which means predictor variables have very little explanatory power. 
+
+
+
+```{r}
+# Testing for spatial autocorrelation
+# test using dharma
+# Simulate DHARMa residuals
+sim_res_carabid_rich <- simulateResiduals(carabid_richness_poisson, plot = FALSE)
+
+# recalculate per site
+sim_res_site_carabid_rich <- recalculateResiduals(sim_res_carabid_rich, group = data_dharma_carabids$site_ID)
+
+# aggregate coordinates by site
+coords_site_carabids <- data_dharma_carabids %>%
+  group_by(site_ID) %>%
+  summarise(
+    long = first(long),
+    lat  = first(lat),
+    .groups = "drop"
+  ) %>%
+  arrange(site_ID)
+
+# Spatial autocorrelation test (coords repeated for each observation at same site)
+testSpatialAutocorrelation(
+  sim_res_site_carabid_rich,
+  x = coords_site_carabids$long,
+  y = coords_site_carabids$lat
+)
+
+```
+
+
+##### Model outputs
+
+```{r}
+# Tidy fixed effects with 95% CIs (log scale)
+fx_carabid_richness <- tidy(carabid_richness_poisson, effects = "fixed", conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = dplyr::recode(term,
+                               "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+    ),
+    sig = p.value < 0.05
+  )
+
+# plot GLMM model fixed effects
+p_log_carabid_richness <- ggplot(fx_carabid_richness, aes(x = estimate, y = term_label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.6) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high,
+                     alpha = ifelse(sig, 1, 0.5)), height = 0.18) +
+  geom_point(aes(alpha = ifelse(sig, 1, 0.5)), size = 2.8) +
+  scale_alpha_identity() +
+  labs(x = NULL, y = NULL,
+       title = "Carabid Richness") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank()
+        )
+
+p_log_carabid_richness
+
+
+```
+
+No significant predictors for carabid richness, all confidence intervals cross 0. 
+
+
+
+
+##### Sensitivity analysis: landscape scale
+
+```{r}
+
+# Build a function to fit the model for a given natural-cover scale
+carabid_richness_scale <- function(nat_col, data = carabid_df_clean) {
+
+  # Create the formula programmatically so only nat_col changes
+  f <- as.formula(paste(
+    "species_richness ~",
+    "z_veg_height + z_veg_cover + z_veg_richness +",
+    nat_col, "+ z_distance_natural + year +",
+    "(1 | site_ID) + offset(log(trap_count))"
+  ))
+
+  glmmTMB(
+    formula = f,
+    data = data,
+    family = poisson()
+  )
+}
+
+# Fit all scales 
+carabid_richness_fit <- setNames(
+  lapply(nat_cols, carabid_richness_scale),
+  paste0(scales, "m")
+)
+
+# Compare model fit across scales (AIC) 
+carabid_richness_aic <- tibble(
+  scale = names(carabid_richness_fit),
+  AIC = sapply(carabid_richness_fit, AIC)
+) %>%
+  arrange(AIC) %>%
+  mutate(delta_AIC = AIC - min(AIC))
+
+carabid_richness_aic
+
+# Extract the effect of "total natural" at each scale (estimate + CI)
+# This pulls the coefficient that matches the nat_col used in each model.
+carabid_richness_coef <- imap_dfr(carabid_richness_fit, function(mod, scale_nm){
+
+  nat_term <- paste0("z_total_natural_", sub("m", "", scale_nm))
+
+  broom.mixed::tidy(mod, effects = "fixed", conf.int = TRUE) %>%
+    filter(term == nat_term) %>%
+    mutate(scale = scale_nm) %>%
+    select(scale, term, estimate, conf.low, conf.high, std.error, statistic, p.value)
+})
+
+carabid_richness_coef %>% arrange(as.numeric(sub("m","", scale)))
+```
+
+Not sifnigicant at any scale.
+
+
+### Model Summaries and Outputs
+
+Output table for GLMM model results
+
+
+#### Management 
+
+```{r}
+# helper function
+tidy_glmm <- function(model, response_label) {
+  tidy(model, effects = "fixed") %>%
+    # drop intercept or keep it; here we keep it and give a label
+    dplyr::mutate(
+      Predictor = dplyr::recode(
+        term,
+        "management_typeorg"  = "Management: Organic",
+        "habitatDR"           = "Inter-row habitat",
+        "year2025"            = "Year (2025)",   # if present
+        .default = term       # 
+      ),
+      Response = response_label
+    ) %>%
+    dplyr::select(Response, Predictor, estimate, std.error, statistic, p.value)
+}
+
+# create table for each response variable
+tab_spider_abund_mgmt   <- tidy_glmm(spider_abund_mgmt_nb,   "Spider abundance")
+tab_spider_rich_mgmt    <- tidy_glmm(spider_richness_mgmt_compois,    "Spider family richness")
+tab_carabid_abund_mgmt  <- tidy_glmm(carabid_abund_mgmt_nb,  "Carabid abundance")
+tab_carabid_rich_mgmt   <- tidy_glmm(carabid_richness_mgmt_poisson,   "Carabid species richness")
+
+# combine tables
+model_results_mgmt <- bind_rows(
+  tab_spider_rich_mgmt,
+  tab_spider_abund_mgmt,
+  tab_carabid_rich_mgmt,
+  tab_carabid_abund_mgmt
+)
+
+# clean up numbers
+model_results_mgmt_clean <- model_results_mgmt %>%
+  dplyr::mutate(
+    Estimate = round(estimate, 2),
+    SE       = round(std.error, 2),
+    z        = round(statistic, 2),
+    p_raw    = p.value,
+    p        = case_when(
+      p_raw < 0.001 ~ "< 0.001",
+      TRUE          ~ sprintf("%.3f", p_raw)
+    )
+  ) %>%
+  dplyr::select(Response, Predictor, Estimate, SE, z, p) %>%
+  arrange(Response, Predictor) 
+
+# save as table
+write.csv(
+  model_results_mgmt_clean,
+  here::here("02_tables", "model_results_mgmt_clean.csv"),
+  row.names = FALSE
+)
+
+# get group indices
+kable(
+  model_results_mgmt_clean,
+  col.names = c("Response variable", "Predictors", "Estimate", "SE", "z", "p"),
+  align    = "llrrrr",
+  booktabs = TRUE,
+  caption  = "GLMM results for spider and carabid responses.",
+  escape   = FALSE        # important for bold p-values
+) %>%
+  kable_styling(full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+
+
+
+
+
+And a final figure for GLMM model results
+
+```{r}
+# labels for predictor variables
+predictor_levels <- c(
+  "Year: 2025",
+  "Management: Organic",
+  "Inter-row Habitat"
+)
+
+# specify plot parameters
+make_effect_plot <- function(fx, panel_title, xlim = c(-0.5, 1.2), show_y_labels = TRUE) {
+
+  fx <- fx %>%
+    mutate(
+      term_label = factor(term_label, levels = rev(predictor_levels)),
+      col = ifelse(sig, "sig", "nonsig")
+    )
+
+  p <- ggplot(fx, aes(x = estimate, y = term_label)) +
+    geom_vline(xintercept = 0, linetype = 2, linewidth = 0.5, colour = "grey40") +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                   height = 0.18, linewidth = 0.4, colour = "grey40") +
+    geom_point(aes(fill = col), shape = 21, size = 2.8, stroke = 0.3) +
+    scale_fill_manual(values = c(sig = "black", nonsig = "grey70"), guide = "none") +
+    coord_cartesian(xlim = xlim) +
+    labs(x = NULL, y = NULL, title = panel_title) +
+    theme_minimal(base_size = 10) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_line(colour = "grey90"),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.text.x = element_text(size = 8)
+    )
+
+  if (!show_y_labels) {
+    p <- p + theme(axis.text.y = element_blank(),
+                   axis.ticks.y = element_blank())
+  }
+
+  return(p)
+}
+
+# make plot for each response variable
+# only show the y axis labels for figures on the left
+pA <- make_effect_plot(fx_spider_abund_mgmt,     "Spider abundance",       show_y_labels = TRUE)
+pB <- make_effect_plot(fx_spider_richness_mgmt,      "Spider richness",        show_y_labels = FALSE)
+pC <- make_effect_plot(fx_carabid_abund_mgmt,    "Carabid abundance",      show_y_labels = TRUE)
+pD <- make_effect_plot(fx_carabid_richness_mgmt, "Carabid richness",       show_y_labels = FALSE)
+
+
+# combine model output figures
+p_log_all <- cowplot::plot_grid(
+  pA, pB,
+  pC, pD,
+  labels = c("A", "B", "C", "D"),
+  label_size = 10,
+  ncol = 2
+)
+
+# add x axis label at the bottom
+final_model_output <- cowplot::plot_grid(
+  p_log_all,
+  ggdraw() + draw_label("Estimate (log scale)", size = 10),
+  ncol = 1,
+  rel_heights = c(1, 0.05)
+)
+
+final_model_output
+
+
+# save to figures folder
+ggsave(
+  filename = here::here("03_figures", "final_mgmt_output.png"),
+  plot = final_model_output,
+  width = 7,      
+  height = 5,     
+  dpi = 300       # high-resolution
+)
+
+```
+
+
+#### Local and landscape factors
+
+```{r}
+# create function to make model
+tidy_glmm <- function(model, response_label) {
+  tidy(model, effects = "fixed") %>%
+    # drop intercept or keep it; here we keep it and give a label
+    dplyr::mutate(
+      Predictor = dplyr::recode(
+        term,
+                              "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025",
+        .default = term       # 
+      ),
+      Response = response_label
+    ) %>%
+    dplyr::select(Response, Predictor, estimate, std.error, statistic, p.value)
+}
+
+# create table for each response variable
+tab_spider_abund   <- tidy_glmm(spider_abund_nb,   "Spider abundance")
+tab_spider_rich    <- tidy_glmm(spider_richness_compois,    "Spider family richness")
+tab_carabid_abund  <- tidy_glmm(carabid_abund_nb,  "Carabid abundance")
+tab_carabid_rich   <- tidy_glmm(carabid_richness_poisson,   "Carabid species richness")
+
+# combine tables
+model_results_all <- bind_rows(
+  tab_spider_rich,
+  tab_spider_abund,
+  tab_carabid_rich,
+  tab_carabid_abund
+)
+
+# clean up numbers
+model_results_clean <- model_results_all %>%
+  dplyr::mutate(
+    Estimate = round(estimate, 2),
+    SE       = round(std.error, 2),
+    z        = round(statistic, 2),
+    p_raw    = p.value,
+    p        = case_when(
+      p_raw < 0.001 ~ "< 0.001",
+      TRUE          ~ sprintf("%.3f", p_raw)
+    )
+  ) %>%
+  dplyr::select(Response, Predictor, Estimate, SE, z, p) %>%
+  arrange(Response, Predictor) 
+
+# save as table
+write.csv(
+  model_results_clean,
+  here::here("02_tables", "LL_model_results_clean.csv"),
+  row.names = FALSE
+)
+
+# get group indices
+kable(
+  model_results_clean,
+  col.names = c("Response variable", "Predictors", "Estimate", "SE", "z", "p"),
+  align    = "llrrrr",
+  booktabs = TRUE,
+  caption  = "GLMM results for spider and carabid responses.",
+  escape   = FALSE        # important for bold p-values
+) %>%
+  kable_styling(full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+
+```
+
+
+
+
+
+And a final figure for GLMM model results
+
+```{r}
+# labels for predictor variables
+predictor_levels <- c(
+                                "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+)
+
+# specify plot parameters
+make_effect_plot <- function(fx, panel_title, xlim = c(-0.5, 1.2), show_y_labels = TRUE) {
+
+  fx <- fx %>%
+    mutate(
+      term_label = factor(term_label, levels = rev(predictor_levels)),
+      col = ifelse(sig, "sig", "nonsig")
+    )
+
+  p <- ggplot(fx, aes(x = estimate, y = term_label)) +
+    geom_vline(xintercept = 0, linetype = 2, linewidth = 0.5, colour = "grey40") +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                   height = 0.18, linewidth = 0.4, colour = "grey40") +
+    geom_point(aes(fill = col), shape = 21, size = 2.8, stroke = 0.3) +
+    scale_fill_manual(values = c(sig = "black", nonsig = "grey70"), guide = "none") +
+    coord_cartesian(xlim = xlim) +
+    labs(x = NULL, y = NULL, title = panel_title) +
+    theme_minimal(base_size = 10) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_line(colour = "grey90"),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.text.x = element_text(size = 8)
+    )
+
+  if (!show_y_labels) {
+    p <- p + theme(axis.text.y = element_blank(),
+                   axis.ticks.y = element_blank())
+  }
+
+  return(p)
+}
+
+# make plot for each response variable
+# only show the y axis labels for figures on the left
+pA <- make_effect_plot(fx_spider_abund,     "Spider abundance",       show_y_labels = TRUE)
+pB <- make_effect_plot(fx_spider_richness,      "Spider richness",        show_y_labels = FALSE)
+pC <- make_effect_plot(fx_carabid_abund,    "Carabid abundance",      show_y_labels = TRUE)
+pD <- make_effect_plot(fx_carabid_richness, "Carabid richness",       show_y_labels = FALSE)
+
+
+# combine model output figures
+p_log_all <- cowplot::plot_grid(
+  pA, pB,
+  pC, pD,
+  labels = c("A", "B", "C", "D"),
+  label_size = 10,
+  ncol = 2
+)
+
+# add x axis label at the bottom
+LL_model_output <- cowplot::plot_grid(
+  p_log_all,
+  ggdraw() + draw_label("Estimate (log scale)", size = 10),
+  ncol = 1,
+  rel_heights = c(1, 0.05)
+)
+
+LL_model_output
+
+
+
+# save to figures folder
+ggsave(
+  filename = here::here("03_figures", "LL_model_output.png"),
+  plot = LL_model_output,
+  width = 7,      
+  height = 6,     
+  dpi = 300       # high-resolution
+)
+
+```
+
+
+#### Inter-annual variation
+
+```{r}
+# labels for predictor variables
+predictor_levels <- c(
+                                "z_veg_height"         = "Vegetation height",
+                               "z_veg_cover"          = "Vegetation cover",
+                               "z_veg_richness"       = "Vegetation richness",
+                               "z_total_natural_500"  = "Natural habitat (500 m)",
+                               "z_distance_natural"  = "Distance to Natural habitat",
+                               "year2025"             = "Year: 2025"
+)
+
+# specify plot parameters
+make_effect_plot <- function(fx, panel_title, xlim = c(-0.5, 1.2), show_y_labels = TRUE) {
+
+  fx <- fx %>%
+    mutate(
+      term_label = factor(term_label, levels = rev(predictor_levels)),
+      col = ifelse(sig, "sig", "nonsig")
+    )
+
+  p <- ggplot(fx, aes(x = estimate, y = term_label)) +
+    geom_vline(xintercept = 0, linetype = 2, linewidth = 0.5, colour = "grey40") +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                   height = 0.18, linewidth = 0.4, colour = "grey40") +
+    geom_point(aes(fill = col), shape = 21, size = 2.8, stroke = 0.3) +
+    scale_fill_manual(values = c(sig = "black", nonsig = "grey70"), guide = "none") +
+    coord_cartesian(xlim = xlim) +
+    labs(x = NULL, y = NULL, title = panel_title) +
+    theme_minimal(base_size = 10) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_line(colour = "grey90"),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.text.x = element_text(size = 6)
+    )
+
+  if (!show_y_labels) {
+    p <- p + theme(axis.text.y = element_blank(),
+                   axis.ticks.y = element_blank())
+  }
+
+  return(p)
+}
+
+# make plot for each response variable
+# only show the y axis labels for figures on the left
+pA <- make_effect_plot(fx_abund_spider_2024,     "Spider abundance 2024",       show_y_labels = TRUE)
+pB <- make_effect_plot(fx_abund_spider_2025,      "Spider abundance 2025",        show_y_labels = FALSE)
+pC <- make_effect_plot(fx_richness_spider_2024,     "Spider richness 2024",       show_y_labels = TRUE)
+pD <- make_effect_plot(fx_richness_spider_2025,      "Spider richness 2025",        show_y_labels = FALSE)
+pE <- make_effect_plot(fx_abund_carabid_2024,    "Carabid abundance 2024",      show_y_labels = TRUE)
+pF <- make_effect_plot(fx_abund_carabid_2025, "Carabid abundance 2025",       show_y_labels = FALSE)
+
+
+# combine model output figures
+p_log_all <- cowplot::plot_grid(
+  pA, pB,
+  pC, pD,
+  pE, pF,
+  labels = c("A", "B", "C", "D", "E", "F"),
+  label_size = 8,
+  ncol = 2
+)
+
+# add x axis label at the bottom
+final_model_output_year <- cowplot::plot_grid(
+  p_log_all,
+  ggdraw() + draw_label("Estimate (log scale)", size = 8),
+  ncol = 1,
+  rel_heights = c(1.5, 0.05)
+)
+
+final_model_output_year
+
+
+
+
+
+```
+
+Make a table showing the model outputs for response variables modelled independently by year
+
+```{r}
+# create table for each response variable
+tab_spider_abund_2024   <- tidy_glmm(spider_abund_2024,   "Spider abundance 2024")
+tab_spider_abund_2025   <- tidy_glmm(spider_abund_2025,    "Spider abundance 2025")
+tab_carabid_abund_2024  <- tidy_glmm(carabid_abund_2024,  "Carabid abundance 2024")
+tab_carabid_abund_2025   <- tidy_glmm(carabid_abund_2025,   "Carabid abundance 2025")
+
+# combine tables
+model_results_years <- bind_rows(
+  tab_spider_abund_2024,
+  tab_spider_abund_2025,
+  tab_carabid_abund_2024,
+  tab_carabid_abund_2025
+)
+
+# clean up numbers
+model_results_years_clean <- model_results_years %>%
+  dplyr::mutate(
+    Estimate = round(estimate, 2),
+    SE       = round(std.error, 2),
+    z        = round(statistic, 2),
+    p_raw    = p.value,
+    p        = case_when(
+      p_raw < 0.001 ~ "< 0.001",
+      TRUE          ~ sprintf("%.3f", p_raw)
+    )
+  ) %>%
+  dplyr::select(Response, Predictor, Estimate, SE, z, p) %>%
+  arrange(Response, Predictor) 
+
+# save as table
+write.csv(
+  model_results_years_clean,
+  here::here("02_tables", "model_results_years_clean.csv"),
+  row.names = FALSE
+)
+
+
+# get group indices
+kable(
+  model_results_years_clean,
+  col.names = c("Response variable", "Predictors", "Estimate", "SE", "z", "p"),
+  align    = "llrrrr",
+  booktabs = TRUE,
+  caption  = "GLMM results for spider and carabid responses.",
+  escape   = FALSE        # important for bold p-values
+) %>%
+  kable_styling(full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+
+```
+
+
+

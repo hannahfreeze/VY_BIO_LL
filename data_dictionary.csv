@@ -1,0 +1,33 @@
+Dataset,Variable,Description,Units,Example,Notes
+spider_VY_df,pitfall_ID,Unique identifier for each pitfall trap,Text/ numerical (PF###),PF001,Links to traps_set
+spider_VY_df,year,Sampling year,integer,2024/2025,
+spider_VY_df,year_established,Year site was established,integer,2024/2025,
+spider_VY_df,habitat,Habitat type within vineyard,factor,CR; DR,Crop row (vine row) vs. drive row (inter-row)
+spider_VY_df,sample_period,Sampling month,factor,JUN,June
+spider_VY_df,site_ID,Unique vineyard site identifier,numerical,1,Consistent across all datasets
+spider_VY_df,total_count,Total number of individuals collected,integer,individuals,
+spider_VY_df,family_richness,Number of spider families,integer,families,
+spider_VY_df,family_names,Names  of each spider family (column) with count (rows),integer,AGELENIDAE,
+carabid_VY_df,pitfall_ID,Unique identifier for each pitfall trap,Text/ numerical (PF###),PF001,
+carabid_VY_df,year,Sampling year,integer,2024/2025,
+carabid_VY_df,habitat,Habitat type within vineyard,factor,CR; DR,
+carabid_VY_df,sample_period,Sampling month,factor,JUN,
+carabid_VY_df,site_ID,Unique vineyard site identifier,numerical,1,
+carabid_VY_df,total_abundance,Total number of individuals collected,integer,individuals,
+carabid_VY_df,species_richness,Number of carabid species,integer,species,
+carabid_VY_df,species_names,Names  of each carabid species (column) with count (rows),integer,Agonoleptus_conjunctus,
+vineyard_sites,site_ID,Vineyard site ID,numerical,1,
+vineyard_sites,management_type,Vineyard management,Categorical,"org, conv",From grower survey
+veg_data_VY,site_ID,Vineyard site ID,numerical,1,
+veg_data_VY,habitat,habitat type,Categorical,DR,
+veg_data_VY,year,Sampling year,integer,2024/2025,
+veg_data_VY,avg_veg_height,Mean vegetation height in quadrat,cm,18.4,
+veg_data_VY,avg_veg_cover,Average vegetation cover (Daubenmire midpoint),%,72,
+veg_data_VY,veg_richness,Plant species richness per quadrat,Count,12,
+landscape_metrics,site_ID,Vineyard site code,numerical,1,
+landscape_metrics,total_natural,Proportion of natural habitat within buffer,percent,0.32,"at multiple buffers scales (100, 250, 500, 750, 1000)"
+landscape_metrics,distance_to_natural,Distance to nearest natural habitat,m,125,
+site_coordinates,site_ID,Vineyard site ID,numerical,1,
+site_coordinates,elevation_m,elevation above sea level (m),numerical,413,From weather station
+site_coordinates,lat,latitude,numerical,49,determined by middle pitfall trap (#3)
+site_coordinates,long,longitude,numerical,-119,determined by middle pitfall trap (#3)
